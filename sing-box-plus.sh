@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------
 # Sing-Box Docker Manager (Multi-Protocol, No-Cert)
+# Author: Alvin9999
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.1.0"
 # -------------------------------------------------------
 set -euo pipefail
 
 ########################  彩色样式  ########################
-C_RESET="\033[0m"
-C_BOLD="\033[1m"
-C_DIM="\033[2m"
-C_RED="\033[31m"
-C_GREEN="\033[32m"
-C_YELLOW="\033[33m"
-C_BLUE="\033[34m"
-C_CYAN="\033[36m"
+C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
+C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
+C_BLUE="\033[34m"; C_CYAN="\033[36m"
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 banner(){
   clear
@@ -27,21 +23,21 @@ banner(){
   hr
 }
 
-########################  默认项  ########################
+########################  默认项（首装就全开）  ########################
 SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 协议开关（均无需证书）
+# 全部协议默认开启（一次性全部生成）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_H2R=${ENABLE_VLESS_H2R:-true}
-ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-false}
-ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-false}
+ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
+ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
 ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
-ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-false}
-ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-false}  # 明文，仅测试
+ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-true}
+ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}  # 明文WS，仍默认开（首装“全开”符合你的要求）
 
 # Reality 握手目标
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
@@ -166,7 +162,7 @@ b64url_strip(){ b64url "$1" | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
 
 ########################  BBR 加速  ########################
 enable_bbr(){
-  info "开启 BBR 加速（自动优先 bbr2，不可用则使用 bbr）..."
+  info "开启 BBR（优先 bbr2）..."
   modprobe tcp_bbr 2>/dev/null || true
   local avail cc="bbr"
   avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
@@ -176,9 +172,50 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=$cc
 EOF
   sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null || true
-  echo -e "${C_DIM}当前拥塞算法:${C_RESET} $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-  echo -e "${C_DIM}默认队列:${C_RESET}      $(sysctl -n net.core.default_qdisc 2>/dev/null)"
-  info "BBR 设置完成（如为新装内核，重启后生效更稳）。"
+  info "BBR 设置完成（如为新装内核，重启后更稳）。"
+}
+
+########################  防火墙放行  ########################
+_open_ufw(){
+  local p proto; for p in "$@"; do
+    proto="${p#*/}"; port="${p%/*}"
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+  done
+  ufw reload >/dev/null 2>&1 || true
+}
+_open_iptables(){
+  apt-get update -y >/dev/null 2>&1 || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
+  local port proto
+  for it in "$@"; do
+    proto="${it#*/}"; port="${it%/*}"
+    [[ "$proto" == "tcp" ]] && iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+    [[ "$proto" == "udp" ]] && iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$port" -j ACCEPT
+  done
+  netfilter-persistent save >/dev/null 2>&1 || true
+}
+open_firewall(){
+  # 组装需要放行的端口/协议
+  local rules=()
+  [[ "$ENABLE_VLESS_REALITY" == true ]]  && rules+=("${PORT_VLESSR}/tcp")
+  [[ "$ENABLE_VLESS_H2R" == true ]]      && rules+=("${PORT_VLESS_H2R}/tcp")
+  [[ "$ENABLE_VLESS_GRPCR" == true ]]    && rules+=("${PORT_VLESS_GRPCR}/tcp")
+  [[ "$ENABLE_TROJAN_REALITY" == true ]] && rules+=("${PORT_TROJANR}/tcp")
+  [[ "$ENABLE_HYSTERIA2" == true ]]      && rules+=("${PORT_HY2}/udp")
+  [[ "$ENABLE_TUIC" == true ]]           && rules+=("${PORT_TUIC}/udp")
+  [[ "$ENABLE_SS2022" == true ]]         && rules+=("${PORT_SS2022}/tcp")
+  if [[ "$ENABLE_SHADOWTLS_SS" == true ]]; then
+    rules+=("${PORT_STLS}/tcp" "${PORT_STLS_SS}/tcp")
+  fi
+  [[ "$ENABLE_VMESS_WS" == true ]]       && rules+=("${PORT_VMESS_WS}/tcp")
+
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q -E "Status: active|状态： 活跃"; then
+    info "检测到 UFW，放行端口..."
+    _open_ufw "${rules[@]}"
+  else
+    info "使用 iptables 放行端口..."
+    _open_iptables "${rules[@]}"
+  fi
 }
 
 ########################  配置写入  ########################
@@ -242,163 +279,99 @@ write_config(){
   for v in PORT_VLESSR PORT_VLESS_H2R PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_TUIC PORT_SS2022 PORT_STLS PORT_STLS_SS PORT_VMESS_WS; do
     [[ -n "${!v:-}" ]] && PORTS+=("${!v}")
   done
-  [[ "$ENABLE_VLESS_REALITY" == true   && -z "${PORT_VLESSR:-}"      ]] && PORT_VLESSR=$(gen_port)
-  [[ "$ENABLE_VLESS_H2R" == true       && -z "${PORT_VLESS_H2R:-}"   ]] && PORT_VLESS_H2R=$(gen_port)
-  [[ "$ENABLE_VLESS_GRPCR" == true     && -z "${PORT_VLESS_GRPCR:-}" ]] && PORT_VLESS_GRPCR=$(gen_port)
-  [[ "$ENABLE_TROJAN_REALITY" == true  && -z "${PORT_TROJANR:-}"     ]] && PORT_TROJANR=$(gen_port)
-  [[ "$ENABLE_HYSTERIA2" == true       && -z "${PORT_HY2:-}"         ]] && PORT_HY2=$(gen_port)
-  [[ "$ENABLE_TUIC" == true            && -z "${PORT_TUIC:-}"        ]] && PORT_TUIC=$(gen_port)
-  [[ "$ENABLE_SS2022" == true          && -z "${PORT_SS2022:-}"      ]] && PORT_SS2022=$(gen_port)
-  if [[ "$ENABLE_SHADOWTLS_SS" == true ]]; then
-    [[ -z "${PORT_STLS:-}"    ]] && PORT_STLS=$(gen_port)
-    [[ -z "${PORT_STLS_SS:-}" ]] && PORT_STLS_SS=$(gen_port)
-  fi
-  [[ "$ENABLE_VMESS_WS" == true        && -z "${PORT_VMESS_WS:-}"    ]] && PORT_VMESS_WS=$(gen_port)
+  [[ -z "${PORT_VLESSR:-}"      ]] && PORT_VLESSR=$(gen_port)
+  [[ -z "${PORT_VLESS_H2R:-}"   ]] && PORT_VLESS_H2R=$(gen_port)
+  [[ -z "${PORT_VLESS_GRPCR:-}" ]] && PORT_VLESS_GRPCR=$(gen_port)
+  [[ -z "${PORT_TROJANR:-}"     ]] && PORT_TROJANR=$(gen_port)
+  [[ -z "${PORT_HY2:-}"         ]] && PORT_HY2=$(gen_port)
+  [[ -z "${PORT_TUIC:-}"        ]] && PORT_TUIC=$(gen_port)
+  [[ -z "${PORT_SS2022:-}"      ]] && PORT_SS2022=$(gen_port)
+  [[ -z "${PORT_STLS:-}"        ]] && PORT_STLS=$(gen_port)
+  [[ -z "${PORT_STLS_SS:-}"     ]] && PORT_STLS_SS=$(gen_port)
+  [[ -z "${PORT_VMESS_WS:-}"    ]] && PORT_VMESS_WS=$(gen_port)
   save_ports
 
-  # 配置文件
+  # 配置文件（全部 inbound 的 listen 改为 0.0.0.0，避免仅绑 IPv6）
   SERVER_IP=$(get_ip)
   cat > "$SB_DIR/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
   "inbounds": [
-$( # VLESS Reality
-if [[ "$ENABLE_VLESS_REALITY" == true ]]; then
-cat <<JSON
     {
       "type": "vless",
       "tag": "vless-reality",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_VLESSR,
       "users": [ { "uuid": "$UUID", "flow": "xtls-rprx-vision" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$REALITY_SERVER",
-        "reality": {
-          "enabled": true,
+      "tls": { "enabled": true, "server_name": "$REALITY_SERVER",
+        "reality": { "enabled": true,
           "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
-          "private_key": "$REALITY_PRIV",
-          "short_id": ["$REALITY_SID"]
-        }
-      }
+          "private_key": "$REALITY_PRIV", "short_id": ["$REALITY_SID"] } }
     },
-JSON
-fi
-# VLESS H2 Reality
-if [[ "$ENABLE_VLESS_H2R" == true ]]; then
-cat <<JSON
     {
       "type": "vless",
       "tag": "vless-h2r",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_VLESS_H2R,
       "users": [ { "uuid": "$UUID" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$REALITY_SERVER",
-        "reality": {
-          "enabled": true,
+      "tls": { "enabled": true, "server_name": "$REALITY_SERVER",
+        "reality": { "enabled": true,
           "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
-          "private_key": "$REALITY_PRIV",
-          "short_id": ["$REALITY_SID"]
-        }
-      },
+          "private_key": "$REALITY_PRIV", "short_id": ["$REALITY_SID"] } },
       "transport": { "type": "http", "path": "$H2_PATH" }
     },
-JSON
-fi
-# VLESS gRPC Reality
-if [[ "$ENABLE_VLESS_GRPCR" == true ]]; then
-cat <<JSON
     {
       "type": "vless",
       "tag": "vless-grpcr",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_VLESS_GRPCR,
       "users": [ { "uuid": "$UUID" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$REALITY_SERVER",
-        "reality": {
-          "enabled": true,
+      "tls": { "enabled": true, "server_name": "$REALITY_SERVER",
+        "reality": { "enabled": true,
           "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
-          "private_key": "$REALITY_PRIV",
-          "short_id": ["$REALITY_SID"]
-        }
-      },
+          "private_key": "$REALITY_PRIV", "short_id": ["$REALITY_SID"] } },
       "transport": { "type": "grpc", "service_name": "$GRPC_SERVICE" }
     },
-JSON
-fi
-# Trojan Reality
-if [[ "$ENABLE_TROJAN_REALITY" == true ]]; then
-cat <<JSON
     {
       "type": "trojan",
       "tag": "trojan-reality",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_TROJANR,
       "users": [ { "password": "$UUID" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$REALITY_SERVER",
-        "reality": {
-          "enabled": true,
+      "tls": { "enabled": true, "server_name": "$REALITY_SERVER",
+        "reality": { "enabled": true,
           "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
-          "private_key": "$REALITY_PRIV",
-          "short_id": ["$REALITY_SID"]
-        }
-      }
+          "private_key": "$REALITY_PRIV", "short_id": ["$REALITY_SID"] } }
     },
-JSON
-fi
-# Hysteria2
-if [[ "$ENABLE_HYSTERIA2" == true ]]; then
-cat <<JSON
     {
       "type": "hysteria2",
       "tag": "hy2",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_HY2,
       "users": [ { "name": "hy2", "auth": "$HY2_AUTH" } ]
     },
-JSON
-fi
-# TUIC v5
-if [[ "$ENABLE_TUIC" == true ]]; then
-cat <<JSON
     {
       "type": "tuic",
       "tag": "tuic",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_TUIC,
       "users": [ { "uuid": "$UUID_TUIC", "password": "$TUIC_PWD" } ],
       "congestion_control": "bbr",
       "udp_relay_mode": "native",
       "zero_rtt_handshake": true
     },
-JSON
-fi
-# SS 2022
-if [[ "$ENABLE_SS2022" == true ]]; then
-cat <<JSON
     {
       "type": "shadowsocks",
       "tag": "ss2022",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_SS2022,
       "method": "2022-blake3-aes-256-gcm",
       "password": "$SS2022_PWD"
     },
-JSON
-fi
-# ShadowTLS + SS
-if [[ "$ENABLE_SHADOWTLS_SS" == true ]]; then
-cat <<JSON
     {
       "type": "shadowtls",
       "tag": "shadowtls",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_STLS,
       "version": 3,
       "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
@@ -407,34 +380,21 @@ cat <<JSON
     {
       "type": "shadowsocks",
       "tag": "stls-ss",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_STLS_SS,
       "method": "2022-blake3-aes-256-gcm",
       "password": "$SS2022_PWD"
     },
-JSON
-fi
-# VMess WS 明文
-if [[ "$ENABLE_VMESS_WS" == true ]]; then
-cat <<JSON
     {
       "type": "vmess",
       "tag": "vmess-ws",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT_VMESS_WS,
       "users": [ { "uuid": "$UUID" } ],
       "transport": { "type": "ws", "path": "$VMESS_WS_PATH" }
-    },
-JSON
-fi
-)
-    { "type": "direct", "tag": "direct" },
-    { "type": "block",  "tag": "block" }
+    }
   ],
-  "outbounds": [
-    { "type": "direct", "tag": "direct" },
-    { "type": "block", "tag": "block" }
-  ]
+  "outbounds": [ { "type": "direct" }, { "type": "block" } ]
 }
 EOF
 
@@ -449,30 +409,52 @@ print_links(){
   local ip; ip=$(get_ip)
   local NAME_BASE="sbdk"; local links=()
 
-  [[ "$ENABLE_VLESS_REALITY" == true ]] && links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-vlessr")
-  [[ "$ENABLE_VLESS_H2R" == true ]]     && links+=("vless://${UUID}@${ip}:${PORT_VLESS_H2R}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=http&path=${H2_PATH}#${NAME_BASE}-h2r")
-  [[ "$ENABLE_VLESS_GRPCR" == true ]]   && links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#${NAME_BASE}-grpcr")
-  [[ "$ENABLE_TROJAN_REALITY" == true ]]&& links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-trojanr")
-  [[ "$ENABLE_HYSTERIA2" == true ]]     && links+=("hy2://${HY2_AUTH}@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
-  [[ "$ENABLE_TUIC" == true ]]          && links+=("tuic://${UUID_TUIC}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&udp_relay_mode=native&alpn=h3#${NAME_BASE}-tuic")
-  if [[ "$ENABLE_SS2022" == true ]]; then
-    local SS_METHOD="2022-blake3-aes-256-gcm"
-    links+=("ss://${SS_METHOD}:$(b64url_strip "${SS2022_PWD}")@${ip}:${PORT_SS2022}#${NAME_BASE}-ss2022")
-  fi
-  [[ "$ENABLE_SHADOWTLS_SS" == true ]]  && links+=("shadowtls://${ip}:${PORT_STLS}?server=${REALITY_SERVER}:${REALITY_SERVER_PORT}  ← 连接此，再连本机 SS(${PORT_STLS_SS})")
-  if [[ "$ENABLE_VMESS_WS" == true ]]; then
-    local VMESS_JSON
-    VMESS_JSON=$(cat <<JSON
+  links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-vlessr")
+  links+=("vless://${UUID}@${ip}:${PORT_VLESS_H2R}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=http&path=${H2_PATH}#${NAME_BASE}-h2r")
+  links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#${NAME_BASE}-grpcr")
+  links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-trojanr")
+  links+=("hy2://${HY2_AUTH}@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
+  links+=("tuic://${UUID_TUIC}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&udp_relay_mode=native&alpn=h3#${NAME_BASE}-tuic")
+  links+=("ss://2022-blake3-aes-256-gcm:$(b64url_strip "${SS2022_PWD}")@${ip}:${PORT_SS2022}#${NAME_BASE}-ss2022")
+  links+=("shadowtls://${ip}:${PORT_STLS}?server=${REALITY_SERVER}:${REALITY_SERVER_PORT}  ← 先连此，再连本机 SS(${PORT_STLS_SS})")
+  local VMESS_JSON
+  VMESS_JSON=$(cat <<JSON
 {"v":"2","ps":"${NAME_BASE}-vmessws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
 JSON
 )
-    links+=("vmess://$(b64url "$VMESS_JSON" | tr -d '\n')")
-  fi
+  links+=("vmess://$(b64url "$VMESS_JSON" | tr -d '\n')")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（可导入 v2rayN）${C_RESET}"
-  hr
-  for l in "${links[@]}"; do echo "  $l"; done
-  hr
+  hr; for l in "${links[@]}"; do echo "  $l"; done; hr
+}
+
+########################  端口巡检  ########################
+verify_ports(){
+  info "检查端口监听情况 ..."
+  sleep 1
+  local miss=0; local line
+  declare -A want=()
+  want["$PORT_VLESSR/tcp"]="VLESS Reality"
+  want["$PORT_VLESS_H2R/tcp"]="VLESS H2 Reality"
+  want["$PORT_VLESS_GRPCR/tcp"]="VLESS gRPC Reality"
+  want["$PORT_TROJANR/tcp"]="Trojan Reality"
+  want["$PORT_HY2/udp"]="Hysteria2"
+  want["$PORT_TUIC/udp"]="TUIC v5"
+  want["$PORT_SS2022/tcp"]="SS 2022"
+  want["$PORT_STLS/tcp"]="ShadowTLS"
+  want["$PORT_STLS_SS/tcp"]="ShadowTLS-SS"
+  want["$PORT_VMESS_WS/tcp"]="VMess WS"
+
+  for k in "${!want[@]}"; do
+    local p="${k%/*}"; local proto="${k#*/}"
+    if ss -lntu | grep -q ":${p} "; then
+      printf "  %-22s %s\n" "${want[$k]}" "✅ 监听 ${p}/${proto}"
+    else
+      printf "  %-22s %s\n" "${want[$k]}" "❌ 未监听 ${p}/${proto}"
+      miss=$((miss+1))
+    fi
+  done
+  [[ $miss -eq 0 ]] && info "所有端口已监听。" || warn "有端口未监听：请检查 docker 日志、防火墙/安全组、或端口占用。"
 }
 
 ########################  核心操作  ########################
@@ -482,8 +464,10 @@ deploy_stack(){
   info "启动/更新容器 ..."
   (cd "$SB_DIR" && dcomp up -d)
   systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  open_firewall
   info "部署完成！"
   show_status
+  verify_ports
 }
 
 show_status(){
@@ -498,15 +482,15 @@ show_status(){
   echo
   echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"
   hr
-  [[ "$ENABLE_VLESS_REALITY" == true ]]   && echo "  - VLESS Reality (TCP):      $PORT_VLESSR"
-  [[ "$ENABLE_VLESS_H2R" == true ]]       && echo "  - VLESS H2 Reality (TCP):   $PORT_VLESS_H2R   路径: $H2_PATH"
-  [[ "$ENABLE_VLESS_GRPCR" == true ]]     && echo "  - VLESS gRPC Reality (TCP): $PORT_VLESS_GRPCR service: $GRPC_SERVICE"
-  [[ "$ENABLE_TROJAN_REALITY" == true ]]  && echo "  - Trojan Reality (TCP):     $PORT_TROJANR"
-  [[ "$ENABLE_HYSTERIA2" == true ]]       && echo "  - Hysteria2 (UDP):          $PORT_HY2"
-  [[ "$ENABLE_TUIC" == true ]]            && echo "  - TUIC v5 (UDP):            $PORT_TUIC"
-  [[ "$ENABLE_SS2022" == true ]]          && echo "  - Shadowsocks 2022 (TCP):   $PORT_SS2022"
-  [[ "$ENABLE_SHADOWTLS_SS" == true ]]    && echo "  - ShadowTLS (TCP):          $PORT_STLS  -> 本机SS: $PORT_STLS_SS"
-  [[ "$ENABLE_VMESS_WS" == true ]]        && echo "  - VMess WS 明文 (TCP):      $PORT_VMESS_WS   路径: $VMESS_WS_PATH"
+  echo "  - VLESS Reality (TCP):      $PORT_VLESSR"
+  echo "  - VLESS H2 Reality (TCP):   $PORT_VLESS_H2R   路径: $H2_PATH"
+  echo "  - VLESS gRPC Reality (TCP): $PORT_VLESS_GRPCR service: $GRPC_SERVICE"
+  echo "  - Trojan Reality (TCP):     $PORT_TROJANR"
+  echo "  - Hysteria2 (UDP):          $PORT_HY2"
+  echo "  - TUIC v5 (UDP):            $PORT_TUIC"
+  echo "  - Shadowsocks 2022 (TCP):   $PORT_SS2022"
+  echo "  - ShadowTLS (TCP):          $PORT_STLS  -> 本机SS: $PORT_STLS_SS"
+  echo "  - VMess WS 明文 (TCP):      $PORT_VMESS_WS   路径: $VMESS_WS_PATH"
   hr
   print_links
 }
@@ -549,22 +533,17 @@ rotate_ports(){
   load_env; load_creds || { err "未找到凭据，请先部署"; return 1; }
   info "随机更换所有端口 ..."
   PORTS=()
-  [[ "$ENABLE_VLESS_REALITY" == true ]]   && PORT_VLESSR=$(gen_port)
-  [[ "$ENABLE_VLESS_H2R" == true ]]       && PORT_VLESS_H2R=$(gen_port)
-  [[ "$ENABLE_VLESS_GRPCR" == true ]]     && PORT_VLESS_GRPCR=$(gen_port)
-  [[ "$ENABLE_TROJAN_REALITY" == true ]]  && PORT_TROJANR=$(gen_port)
-  [[ "$ENABLE_HYSTERIA2" == true ]]       && PORT_HY2=$(gen_port)
-  [[ "$ENABLE_TUIC" == true ]]            && PORT_TUIC=$(gen_port)
-  [[ "$ENABLE_SS2022" == true ]]          && PORT_SS2022=$(gen_port)
-  if [[ "$ENABLE_SHADOWTLS_SS" == true ]]; then
-    PORT_STLS=$(gen_port); PORT_STLS_SS=$(gen_port)
-  fi
-  [[ "$ENABLE_VMESS_WS" == true ]]        && PORT_VMESS_WS=$(gen_port)
+  PORT_VLESSR=$(gen_port); PORT_VLESS_H2R=$(gen_port); PORT_VLESS_GRPCR=$(gen_port)
+  PORT_TROJANR=$(gen_port); PORT_HY2=$(gen_port); PORT_TUIC=$(gen_port)
+  PORT_SS2022=$(gen_port); PORT_STLS=$(gen_port); PORT_STLS_SS=$(gen_port)
+  PORT_VMESS_WS=$(gen_port)
   save_ports
   write_config
   (cd "$SB_DIR" && dcomp up -d)
+  open_firewall
   info "端口已全部更换完成（五位随机且互不重复）"
   show_status
+  verify_ports
 }
 
 uninstall_all(){
@@ -582,11 +561,11 @@ uninstall_all(){
 menu(){
   banner
   echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
-  echo -e "  ${C_GREEN}1)${C_RESET} 部署/更新 Sing-Box（生成配置并启动）"
+  echo -e "  ${C_GREEN}1)${C_RESET} 安装/更新 Sing-Box（生成配置并启动）"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
-  echo -e "  ${C_GREEN}4)${C_RESET} 一键更新 Sing-Box Docker 镜像"
-  echo -e "  ${C_GREEN}5)${C_RESET} 一键更新外部脚本 sing-box-plus.sh"
+  echo -e "  ${C_GREEN}4)${C_RESET} 更新 Sing-Box Docker 镜像"
+  echo -e "  ${C_GREEN}5)${C_RESET} 更新外部脚本 sing-box-plus.sh"
   echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速（优先 bbr2）"
   echo -e "  ${C_GREEN}8)${C_RESET} 卸载（停止并删除配置）"
@@ -611,6 +590,6 @@ menu(){
 need_root
 detect_os
 ensure_dirs
-# 启动时自动安装 Docker，安装完进入菜单：
+# 启动时自动安装 Docker，然后进入菜单（第1项就是安装/更新 Sing-Box）
 install_docker
 while true; do menu; done
