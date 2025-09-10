@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------
-# Sing-Box Docker Manager (Reality + HY2 w/ self-signed TLS)
+# Sing-Box Docker Manager (Reality + HY2 + VMess WS)
 # Author: Alvin9999
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.3.6"
+SCRIPT_VERSION="v1.3.7"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -17,13 +17,12 @@ hr(){ printf "${C_DIM}───────────────────�
 
 banner(){
   clear
-  # 只显示标题 & 版本，不显示 OS/Time
   echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"
   hr
 }
 
 ########################  输入修复（退格可用）  ########################
-READ_OPTS=(-e -r)  # -e 启用 readline，退格/左右键可用；-r 原样读取
+READ_OPTS=(-e -r)
 fix_tty(){
   if [[ -t 0 && -t 1 ]]; then
     stty sane 2>/dev/null || true
@@ -36,28 +35,23 @@ fix_tty(){
   fi
 }
 
-########################  开关与默认项  ########################
+########################  选项与默认  ########################
 SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 保留：VLESS Reality / VLESS gRPC Reality / Trojan Reality / HY2 / VMess WS
-# 移除：H2R / TUIC / SS2022 / ShadowTLS
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
 ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}
 
-# Reality 握手目标
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 
-# 传输细节
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
 VMESS_WS_PATH=${VMESS_WS_PATH:-/vm}
 
-# 外部一键脚本（更新用）
 PLUS_RAW_URL="https://raw.githubusercontent.com/Alvin9999/Sing-Box-Plus/main/sing-box-plus.sh"
 PLUS_LOCAL="${SB_DIR}/tools/sing-box-plus.sh"
 
@@ -70,26 +64,13 @@ err(){  echo -e "${C_RED}[ERR ]${C_RESET} $*"; }
 need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：bash $0"; exit 1; }; }
 require_cmd(){ command -v "$1" >/dev/null 2>&1 || { err "缺少命令 $1"; exit 1; }; }
 
-# URL 编码（用于分享链接里的密码）
-urlenc(){ # usage: urlenc "raw string"
+urlenc(){ # URL encode
   local s="$1" o= c
-  for ((i=0;i<${#s};i++)); do
-    c="${s:i:1}"
-    case "$c" in [a-zA-Z0-9.~_-]) o+="$c";; *)
-      printf -v hex '%%%02X' "'$c"; o+="$hex";;
-    esac
-  done
+  for ((i=0;i<${#s};i++)); do c="${s:i:1}"; case "$c" in [a-zA-Z0-9.~_-]) o+="$c";; *) printf -v hex '%%%02X' "'$c"; o+="$hex";; esac; done
   printf '%s' "$o"
 }
 
-detect_os(){
-  . /etc/os-release
-  case "${ID,,}" in
-    debian|ubuntu) : ;;  # 不打印 OS
-    *) err "仅支持 Debian/Ubuntu"; exit 1;;
-  esac
-}
-
+detect_os(){ . /etc/os-release; case "${ID,,}" in debian|ubuntu) :;; *) err "仅支持 Debian/Ubuntu"; exit 1;; esac; }
 ensure_dirs(){ mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools" "$SB_DIR/cert"; chmod 700 "$SB_DIR"; }
 dcomp(){ if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
 get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
@@ -127,15 +108,9 @@ mk_cert(){
   fi
 }
 
-# 五位随机端口（10000-65535）不重复
+# 五位随机端口不重复
 PORTS=()
-gen_port(){
-  while :; do
-    p=$(( ( RANDOM % 55536 ) + 10000 ))
-    [[ $p -gt 65535 ]] && continue
-    if [[ ! " ${PORTS[*]} " =~ " $p " ]]; then PORTS+=("$p"); echo "$p"; return; fi
-  done
-}
+gen_port(){ while :; do p=$(( ( RANDOM % 55536 ) + 10000 )); [[ $p -le 65535 ]] || continue; [[ ! " ${PORTS[*]} " =~ " $p " ]] && { PORTS+=("$p"); echo "$p"; return; }; done; }
 
 save_env(){
   cat > "${SB_DIR}/env.conf" <<EOF
@@ -176,9 +151,7 @@ EOF
 }
 load_ports(){ [[ -f "${SB_DIR}/ports.env" ]] && . "${SB_DIR}/ports.env" || return 1; }
 
-b64url(){ printf "%s" "$1" | base64 -w 0 2>/dev/null || printf "%s" "$1" | base64; }
-
-########################  BBR 加速（原版 bbr）  ########################
+########################  BBR（原版）  ########################
 enable_bbr(){
   info "开启 BBR 加速（原版 bbr）..."
   modprobe tcp_bbr 2>/dev/null || true
@@ -187,23 +160,18 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
   sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null || true
-  local cc qd
-  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+  local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+  local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "?")
   echo
   echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已应用原版 BBR${C_RESET}"
-  echo    "  当前拥塞算法: $cc"
-  echo    "  默认队列:     $qd"
+  echo "  当前拥塞算法: $cc"
+  echo "  默认队列:     $qd"
   echo
   read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
-########################  防火墙放行  ########################
-_open_ufw(){
-  local proto port
-  for it in "$@"; do proto="${it#*/}"; port="${it%/*}"; ufw allow "${port}/${proto}" >/dev/null 2>&1 || true; done
-  ufw reload >/dev/null 2>&1 || true
-}
+########################  防火墙  ########################
+_open_ufw(){ local proto port; for it in "$@"; do proto="${it#*/}"; port="${it%/*}"; ufw allow "${port}/${proto}" >/dev/null 2>&1 || true; done; ufw reload >/dev/null 2>&1 || true; }
 _open_iptables(){
   DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
   local proto port
@@ -231,7 +199,7 @@ open_firewall(){
   fi
 }
 
-########################  配置写入  ########################
+########################  Compose & Systemd  ########################
 write_compose(){
 cat > "$SB_DIR/docker-compose.yml" <<EOF
 services:
@@ -250,7 +218,6 @@ services:
       run
 EOF
 }
-
 write_systemd(){
 cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
 [Unit]
@@ -271,11 +238,11 @@ systemctl daemon-reload
 systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 }
 
-# 凭据 & 端口
+########################  凭据/端口/配置  ########################
 rand_ports_reset(){ PORTS=(); }
 ensure_creds(){
-  [[ -z "${UUID:-}"       ]] && UUID=$(gen_uuid)
-  [[ -z "${HY2_PWD:-}"    ]] && HY2_PWD=$(rand_b64_32)
+  [[ -z "${UUID:-}" ]] && UUID=$(gen_uuid)
+  [[ -z "${HY2_PWD:-}" ]] && HY2_PWD=$(rand_b64_32)
   if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]]; then
     readarray -t RKP < <(gen_reality)
     REALITY_PRIV=$(printf "%s\n" "${RKP[@]}" | awk '/PrivateKey/{print $2}')
@@ -286,15 +253,12 @@ ensure_creds(){
 }
 
 PORT_VLESSR=""; PORT_VLESS_GRPCR=""; PORT_TROJANR=""; PORT_HY2=""; PORT_VMESS_WS=""
-
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
   docker pull "$IMAGE" >/dev/null
   ensure_creds
   rand_ports_reset
-  for v in PORT_VLESSR PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_VMESS_WS; do
-    [[ -n "${!v:-}" ]] && PORTS+=("${!v}")
-  done
+  for v in PORT_VLESSR PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_VMESS_WS; do [[ -n "${!v:-}" ]] && PORTS+=("${!v}"); done
   [[ -z "${PORT_VLESSR:-}"      ]] && PORT_VLESSR=$(gen_port)
   [[ -z "${PORT_VLESS_GRPCR:-}" ]] && PORT_VLESS_GRPCR=$(gen_port)
   [[ -z "${PORT_TROJANR:-}"     ]] && PORT_TROJANR=$(gen_port)
@@ -375,76 +339,79 @@ EOF
   save_env
 }
 
-########################  账号参数（手填用）打印  ########################
+########################  账号参数（手动填写用）  ########################
 print_manual_params(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
+  local pad='  %-24s %s\n'
+
   echo -e "${C_BLUE}${C_BOLD}账号参数（手动填写用）${C_RESET}"
   hr
-  # VLESS Reality
-  cat <<EOT
-[ VLESS Reality (TCP) ]
-  地址(Address):      $ip
-  端口(Port):         $PORT_VLESSR
-  UUID(ID):           $UUID
-  加密(Encryption):   none
-  流控(Flow):         xtls-rprx-vision
-  SNI/Host:           $REALITY_SERVER
-  PublicKey(pbk):     $REALITY_PUB
-  ShortID(sid):       $REALITY_SID
-  传输(Transport):    tcp
-EOT
-  echo
-  # VLESS gRPC Reality
-  cat <<EOT
-[ VLESS gRPC Reality ]
-  地址(Address):      $ip
-  端口(Port):         $PORT_VLESS_GRPCR
-  UUID(ID):           $UUID
-  SNI/Host:           $REALITY_SERVER
-  PublicKey(pbk):     $REALITY_PUB
-  ShortID(sid):       $REALITY_SID
-  传输(Transport):    grpc
-  ServiceName:        $GRPC_SERVICE
-EOT
-  echo
-  # Trojan Reality
-  cat <<EOT
-[ Trojan Reality (TCP) ]
-  地址(Address):      $ip
-  端口(Port):         $PORT_TROJANR
-  密码(Password):     $UUID
-  SNI/Host:           $REALITY_SERVER
-  PublicKey(pbk):     $REALITY_PUB
-  ShortID(sid):       $REALITY_SID
-  传输(Transport):    tcp
-EOT
-  echo
-  # HY2
-  cat <<EOT
-[ Hysteria2 (UDP) ]
-  地址(Address):      $ip
-  端口(Port):         $PORT_HY2
-  密码(Password):     $HY2_PWD
-  SNI/Host:           $REALITY_SERVER
-  证书校验:           关闭 (insecure=1)
-EOT
-  echo
-  # VMess WS
-  cat <<EOT
-[ VMess WS 明文 ]
-  地址(Address):      $ip
-  端口(Port):         $PORT_VMESS_WS
-  UUID(ID):           $UUID
-  AlterID:            0
-  传输(Transport):    ws
-  路径(Path):         $VMESS_WS_PATH
-  TLS:                none
-EOT
+
+  echo "📌 节点1（VLESS Reality / TCP）"
+  printf "$pad" "Address (地址):"       "$ip"
+  printf "$pad" "Port (端口):"          "$PORT_VLESSR"
+  printf "$pad" "UUID (用户ID):"        "$UUID"
+  printf "$pad" "flow (流控):"          "xtls-rprx-vision"
+  printf "$pad" "encryption (加密):"    "none"
+  printf "$pad" "network (传输):"       "tcp"
+  printf "$pad" "headerType (伪装型):"  "none"
+  printf "$pad" "TLS (传输层安全):"     "reality"
+  printf "$pad" "SNI (serverName):"     "$REALITY_SERVER"
+  printf "$pad" "Fingerprint (指纹):"   "chrome"
+  printf "$pad" "Public key (公钥):"    "$REALITY_PUB"
+  printf "$pad" "ShortId:"              "$REALITY_SID"
+  hr
+
+  echo "📌 节点2（VLESS Reality / gRPC）"
+  printf "$pad" "Address (地址):"       "$ip"
+  printf "$pad" "Port (端口):"          "$PORT_VLESS_GRPCR"
+  printf "$pad" "UUID (用户ID):"        "$UUID"
+  printf "$pad" "encryption (加密):"    "none"
+  printf "$pad" "network (传输):"       "grpc"
+  printf "$pad" "ServiceName:"          "$GRPC_SERVICE"
+  printf "$pad" "TLS (传输层安全):"     "reality"
+  printf "$pad" "SNI (serverName):"     "$REALITY_SERVER"
+  printf "$pad" "Fingerprint (指纹):"   "chrome"
+  printf "$pad" "Public key (公钥):"    "$REALITY_PUB"
+  printf "$pad" "ShortId:"              "$REALITY_SID"
+  hr
+
+  echo "📌 节点3（Trojan Reality / TCP）"
+  printf "$pad" "Address (地址):"       "$ip"
+  printf "$pad" "Port (端口):"          "$PORT_TROJANR"
+  printf "$pad" "Password (密码):"      "$UUID"
+  printf "$pad" "network (传输):"       "tcp"
+  printf "$pad" "headerType (伪装型):"  "none"
+  printf "$pad" "TLS (传输层安全):"     "reality"
+  printf "$pad" "SNI (serverName):"     "$REALITY_SERVER"
+  printf "$pad" "Fingerprint (指纹):"   "chrome"
+  printf "$pad" "Public key (公钥):"    "$REALITY_PUB"
+  printf "$pad" "ShortId:"              "$REALITY_SID"
+  hr
+
+  echo "📌 节点4（Hysteria2 / UDP）"
+  printf "$pad" "Address (地址):"       "$ip"
+  printf "$pad" "Port (端口):"          "$PORT_HY2"
+  printf "$pad" "Password (密码):"      "$HY2_PWD"
+  printf "$pad" "TLS (传输层安全):"     "tls"
+  printf "$pad" "SNI (serverName):"     "$REALITY_SERVER"
+  printf "$pad" "Alpn:"                 "h3"
+  printf "$pad" "AllowInsecure:"        "true"
+  hr
+
+  echo "📌 节点5（VMess WS / TCP）"
+  printf "$pad" "Address (地址):"       "$ip"
+  printf "$pad" "Port (端口):"          "$PORT_VMESS_WS"
+  printf "$pad" "UUID (用户ID):"        "$UUID"
+  printf "$pad" "AlterID:"              "0"
+  printf "$pad" "network (传输):"       "ws"
+  printf "$pad" "Path (路径):"          "$VMESS_WS_PATH"
+  printf "$pad" "TLS:"                  "none"
   hr
 }
 
-########################  分享链接输出（带回显控制）  ########################
+########################  分享链接  ########################
 print_links(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
@@ -466,31 +433,7 @@ JSON
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
 }
 
-########################  核心操作  ########################
-deploy_stack(){
-  install_docker
-  ensure_dirs
-  write_config
-  docker run --rm \
-    -v "$SB_DIR/config.json:/config.json:ro" \
-    -v "$SB_DIR/cert:/etc/sing-box/cert:ro" \
-    "$IMAGE" check -c /config.json
-  info "启动/更新容器 ..."
-  (cd "$SB_DIR" && dcomp up -d)
-  systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
-  open_firewall
-
-  # 显眼回显 + 参数区 + 链接；用户选择返回菜单或退出
-  echo
-  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：部署完成${C_RESET}"
-  echo
-  show_status_block
-  print_manual_params
-  print_links
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " opt; [[ "${opt:-}" == q ]] && exit 0
-}
-
+########################  状态块  ########################
 show_status_block(){
   load_env; load_ports || true
   local ip; ip=$(get_ip)
@@ -507,18 +450,36 @@ show_status_block(){
   echo "  - VLESS gRPC Reality (TCP): ${PORT_VLESS_GRPCR:-?}  service: $GRPC_SERVICE"
   echo "  - Trojan Reality (TCP):     ${PORT_TROJANR:-?}"
   echo "  - Hysteria2 (UDP):          ${PORT_HY2:-?}"
-  echo "  - VMess WS 明文 (TCP):      ${PORT_VMESS_WS:-?}  路径: $VMESS_WS_PATH"
+  echo "  - VMess WS (TCP):           ${PORT_VMESS_WS:-?}  路径: $VMESS_WS_PATH"
   hr
+}
+
+########################  核心操作  ########################
+deploy_stack(){
+  install_docker
+  ensure_dirs
+  write_config
+  docker run --rm -v "$SB_DIR/config.json:/config.json:ro" -v "$SB_DIR/cert:/etc/sing-box/cert:ro" "$IMAGE" check -c /config.json
+  info "启动/更新容器 ..."
+  (cd "$SB_DIR" && dcomp up -d)
+  systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  open_firewall
+  echo
+  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：部署完成${C_RESET}"
+  echo
+  show_status_block
+  print_manual_params
+  print_links
+  echo
+  read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " opt; [[ "${opt:-}" == q ]] && exit 0
 }
 
 restart_stack(){
   load_env
   (cd "$SB_DIR" && dcomp restart)
-  echo
-  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：容器已重启${C_RESET}"
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：容器已重启${C_RESET}"
   show_status_block
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
 update_image(){
@@ -535,8 +496,7 @@ update_image(){
     echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已更新至最新镜像（$IMAGE）${C_RESET}"
   fi
   show_status_block
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
 update_plus_script(){
@@ -554,14 +514,12 @@ update_plus_script(){
     fi
     rm -f "$tmp"
   fi
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
 rotate_ports(){
   load_env; load_creds || { err "未找到凭据，请先部署"; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; return 1; }
-  echo
-  info "随机更换所有端口 ..."
+  echo; info "随机更换所有端口 ..."
   PORTS=()
   PORT_VLESSR=$(gen_port); PORT_VLESS_GRPCR=$(gen_port)
   PORT_TROJANR=$(gen_port); PORT_HY2=$(gen_port); PORT_VMESS_WS=$(gen_port)
@@ -574,8 +532,7 @@ rotate_ports(){
   show_status_block
   print_manual_params
   print_links
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " opt; [[ "${opt:-}" == q ]] && exit 0
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " opt; [[ "${opt:-}" == q ]] && exit 0
 }
 
 uninstall_all(){
@@ -586,13 +543,11 @@ uninstall_all(){
   rm -f "/etc/systemd/system/${SYSTEMD_SERVICE}"
   systemctl daemon-reload || true
   rm -rf "$SB_DIR"
-  echo
-  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"
-  echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
-########################  菜单（文案调整 & 回车退出）  ########################
+########################  菜单  ########################
 menu(){
   fix_tty
   banner
