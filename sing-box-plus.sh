@@ -307,68 +307,80 @@ print_manual_params(){
 
   echo -e "${C_BLUE}${C_BOLD}账号参数（手动填写用）${C_RESET}"
   hr
+
+  # 把“键\t值”两列对齐；并加两个空格缩进更好看
   _tbl(){ column -t -s $'\t' | sed 's/^/  /'; }
 
   echo "📌 节点1（VLESS Reality / TCP）"
-  { echo -e "地址\t$ip"
-    echo -e "端口\t$PORT_VLESSR"
-    echo -e "UUID\t$UUID"
-    echo -e "流控\txtls-rprx-vision"
-    echo -e "加密\t无（none）"
-    echo -e "传输\tTCP"
-    echo -e "伪装\t无（none）"
-    echo -e "TLS\tReality"
-    echo -e "SNI\t$REALITY_SERVER"
-    echo -e "指纹\tchrome"
-    echo -e "公钥\t$REALITY_PUB"
-    echo -e "短ID\t$REALITY_SID"; } | _tbl
+  {
+    echo -e "Address (地址)\t$ip"
+    echo -e "Port (端口)\t$PORT_VLESSR"
+    echo -e "UUID (用户ID)\t$UUID"
+    echo -e "flow (流控)\txtls-rprx-vision"
+    echo -e "encryption (加密)\tnone"
+    echo -e "network (传输)\ttcp"
+    echo -e "headerType (伪装型)\tnone"
+    echo -e "TLS (传输层安全)\treality"
+    echo -e "SNI (serverName)\t$REALITY_SERVER"
+    echo -e "Fingerprint (指纹)\tchrome"
+    echo -e "Public key (公钥)\t$REALITY_PUB"
+    echo -e "ShortId\t$REALITY_SID"
+  } | _tbl
   hr
 
   echo "📌 节点2（VLESS Reality / gRPC）"
-  { echo -e "地址\t$ip"
-    echo -e "端口\t$PORT_VLESS_GRPCR"
-    echo -e "UUID\t$UUID"
-    echo -e "加密\t无（none）"
-    echo -e "传输\tgRPC"
-    echo -e "服务名\t$GRPC_SERVICE"
-    echo -e "TLS\tReality"
-    echo -e "SNI\t$REALITY_SERVER"
-    echo -e "指纹\tchrome"
-    echo -e "公钥\t$REALITY_PUB"
-    echo -e "短ID\t$REALITY_SID"; } | _tbl
+  {
+    echo -e "Address (地址)\t$ip"
+    echo -e "Port (端口)\t$PORT_VLESS_GRPCR"
+    echo -e "UUID (用户ID)\t$UUID"
+    echo -e "encryption (加密)\tnone"
+    echo -e "network (传输)\tgrpc"
+    echo -e "ServiceName (服务名)\t$GRPC_SERVICE"
+    echo -e "TLS (传输层安全)\treality"
+    echo -e "SNI (serverName)\t$REALITY_SERVER"
+    echo -e "Fingerprint (指纹)\tchrome"
+    echo -e "Public key (公钥)\t$REALITY_PUB"
+    echo -e "ShortId\t$REALITY_SID"
+  } | _tbl
   hr
 
   echo "📌 节点3（Trojan Reality / TCP）"
-  { echo -e "地址\t$ip"
-    echo -e "端口\t$PORT_TROJANR"
-    echo -e "密码\t$UUID"
-    echo -e "传输\tTCP"
-    echo -e "伪装\t无（none）"
-    echo -e "TLS\tReality"
-    echo -e "SNI\t$REALITY_SERVER"
-    echo -e "指纹\tchrome"
-    echo -e "公钥\t$REALITY_PUB"
-    echo -e "短ID\t$REALITY_SID"; } | _tbl
+  {
+    echo -e "Address (地址)\t$ip"
+    echo -e "Port (端口)\t$PORT_TROJANR"
+    echo -e "Password (密码)\t$UUID"
+    echo -e "network (传输)\ttcp"
+    echo -e "headerType (伪装型)\tnone"
+    echo -e "TLS (传输层安全)\treality"
+    echo -e "SNI (serverName)\t$REALITY_SERVER"
+    echo -e "Fingerprint (指纹)\tchrome"
+    echo -e "Public key (公钥)\t$REALITY_PUB"
+    echo -e "ShortId\t$REALITY_SID"
+  } | _tbl
   hr
 
   echo "📌 节点4（Hysteria2 / UDP）"
-  { echo -e "地址\t$ip"
-    echo -e "端口\t$PORT_HY2"
-    echo -e "密码\t$HY2_PWD"
-    echo -e "TLS\tTLS（自签名）"
-    echo -e "SNI\t$REALITY_SERVER"
-    echo -e "ALPN\th3"
-    echo -e "跳过证书验证\ttrue"; } | _tbl
+  {
+    echo -e "Address (地址)\t$ip"
+    echo -e "Port (端口)\t$PORT_HY2"
+    echo -e "Password (密码)\t$HY2_PWD"
+    echo -e "TLS (传输层安全)\ttls"
+    echo -e "SNI (serverName)\t$REALITY_SERVER"
+    echo -e "Alpn\th3"
+    echo -e "AllowInsecure\ttrue"
+  } | _tbl
   hr
 
   echo "📌 节点5（VMess WS / TCP）"
-  { echo -e "地址\t$ip"
-    echo -e "端口\t$PORT_VMESS_WS"
-    echo -e "UUID\t$UUID"
+  {
+    echo -e "Address (地址)\t$ip"
+    echo -e "Port (端口)\t$PORT_VMESS_WS"
+    echo -e "UUID (用户ID)\t$UUID"
     echo -e "AlterID\t0"
-    echo -e "传输\tWebSocket"
-    echo -e "路径\t$VMESS_WS_PATH"
-    echo -e "TLS\t无"; } | _tbl
+    echo -e "network (传输)\tws"
+    echo -e "Path (路径)\t$VMESS_WS_PATH"
+    echo -e "TLS\tnone"
+  } | _tbl
   hr
 }
 
