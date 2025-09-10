@@ -5,16 +5,15 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.3.9"
+SCRIPT_VERSION="v1.4.0"
 # -------------------------------------------------------
 set -euo pipefail
 
-########################  彩色样式  ########################
+########################  颜色  ########################
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
-
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 
 ########################  输入修复（退格可用）  ########################
@@ -23,11 +22,9 @@ fix_tty(){
   if [[ -t 0 && -t 1 ]]; then
     stty sane 2>/dev/null || true
     local kbs; kbs=$(tput kbs 2>/dev/null || echo '^?')
-    case "$kbs" in
-      $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
-      $'\b'|'^H')   stty erase '^H' 2>/dev/null || true ;;
-      *)            stty erase '^?' 2>/dev/null || true ;;
-    esac
+    case "$kbs" in $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
+                    $'\b'|'^H')  stty erase '^H' 2>/dev/null || true ;;
+                    *)            stty erase '^?' 2>/dev/null || true ;; esac
   fi
 }
 
@@ -36,7 +33,6 @@ SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 保留：VLESS Reality / VLESS gRPC Reality / Trojan Reality / HY2 / VMess WS
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
@@ -45,19 +41,17 @@ ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}
 
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
-
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
 VMESS_WS_PATH=${VMESS_WS_PATH:-/vm}
 
 PLUS_RAW_URL="https://raw.githubusercontent.com/Alvin9999/Sing-Box-Plus/main/sing-box-plus.sh"
 PLUS_LOCAL="${SB_DIR}/tools/sing-box-plus.sh"
-
 SYSTEMD_SERVICE="sing-box-docker.service"
 
 ########################  工具函数  ########################
-info(){ echo -e "${C_GREEN}[INFO]${C_RESET} $*"; }
-warn(){ echo -e "${C_YELLOW}[WARN]${C_RESET} $*"; }
-err(){  echo -e "${C_RED}[ERR ]${C_RESET} $*"; }
+info(){ echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
+warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
+err(){  echo -e "${C_RED}[错误]${C_RESET} $*"; }
 need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：bash $0"; exit 1; }; }
 require_cmd(){ command -v "$1" >/dev/null 2>&1 || { err "缺少命令 $1"; exit 1; }; }
 
@@ -128,8 +122,6 @@ PORT_VMESS_WS=$PORT_VMESS_WS
 EOF
 }
 load_ports(){ [[ -f "${SB_DIR}/ports.env" ]] && . "${SB_DIR}/ports.env" || return 1; }
-
-b64url(){ printf "%s" "$1" | base64 -w 0 2>/dev/null || printf "%s" "$1" | base64; }
 
 ########################  BBR（原版）  ########################
 enable_bbr(){
@@ -308,115 +300,117 @@ EOF
   save_env
 }
 
-########################  账号参数（手动填写用，漂亮对齐）  ########################
+########################  账号参数（对齐表）  ########################
 print_manual_params(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
 
   echo -e "${C_BLUE}${C_BOLD}账号参数（手动填写用）${C_RESET}"
   hr
-
-  _tbl(){ column -t -s $'\t' | sed 's/^/  /'; }  # 键\t值 → 对齐两列
+  _tbl(){ column -t -s $'\t' | sed 's/^/  /'; }
 
   echo "📌 节点1（VLESS Reality / TCP）"
-  { echo -e "Address (地址)\t$ip"
-    echo -e "Port (端口)\t$PORT_VLESSR"
-    echo -e "UUID (用户ID)\t$UUID"
-    echo -e "flow (流控)\txtls-rprx-vision"
-    echo -e "encryption (加密)\tnone"
-    echo -e "network (传输)\ttcp"
-    echo -e "headerType (伪装型)\tnone"
-    echo -e "TLS (传输层安全)\treality"
-    echo -e "SNI (serverName)\t$REALITY_SERVER"
-    echo -e "Fingerprint (指纹)\tchrome"
-    echo -e "Public key (公钥)\t$REALITY_PUB"
-    echo -e "ShortId\t$REALITY_SID"; } | _tbl
+  { echo -e "地址\t$ip"
+    echo -e "端口\t$PORT_VLESSR"
+    echo -e "UUID\t$UUID"
+    echo -e "流控\txtls-rprx-vision"
+    echo -e "加密\t无（none）"
+    echo -e "传输\tTCP"
+    echo -e "伪装\t无（none）"
+    echo -e "TLS\tReality"
+    echo -e "SNI\t$REALITY_SERVER"
+    echo -e "指纹\tchrome"
+    echo -e "公钥\t$REALITY_PUB"
+    echo -e "短ID\t$REALITY_SID"; } | _tbl
   hr
 
   echo "📌 节点2（VLESS Reality / gRPC）"
-  { echo -e "Address (地址)\t$ip"
-    echo -e "Port (端口)\t$PORT_VLESS_GRPCR"
-    echo -e "UUID (用户ID)\t$UUID"
-    echo -e "encryption (加密)\tnone"
-    echo -e "network (传输)\tgrpc"
-    echo -e "ServiceName\t$GRPC_SERVICE"
-    echo -e "TLS (传输层安全)\treality"
-    echo -e "SNI (serverName)\t$REALITY_SERVER"
-    echo -e "Fingerprint (指纹)\tchrome"
-    echo -e "Public key (公钥)\t$REALITY_PUB"
-    echo -e "ShortId\t$REALITY_SID"; } | _tbl
+  { echo -e "地址\t$ip"
+    echo -e "端口\t$PORT_VLESS_GRPCR"
+    echo -e "UUID\t$UUID"
+    echo -e "加密\t无（none）"
+    echo -e "传输\tgRPC"
+    echo -e "服务名\t$GRPC_SERVICE"
+    echo -e "TLS\tReality"
+    echo -e "SNI\t$REALITY_SERVER"
+    echo -e "指纹\tchrome"
+    echo -e "公钥\t$REALITY_PUB"
+    echo -e "短ID\t$REALITY_SID"; } | _tbl
   hr
 
   echo "📌 节点3（Trojan Reality / TCP）"
-  { echo -e "Address (地址)\t$ip"
-    echo -e "Port (端口)\t$PORT_TROJANR"
-    echo -e "Password (密码)\t$UUID"
-    echo -e "network (传输)\ttcp"
-    echo -e "headerType (伪装型)\tnone"
-    echo -e "TLS (传输层安全)\treality"
-    echo -e "SNI (serverName)\t$REALITY_SERVER"
-    echo -e "Fingerprint (指纹)\tchrome"
-    echo -e "Public key (公钥)\t$REALITY_PUB"
-    echo -e "ShortId\t$REALITY_SID"; } | _tbl
+  { echo -e "地址\t$ip"
+    echo -e "端口\t$PORT_TROJANR"
+    echo -e "密码\t$UUID"
+    echo -e "传输\tTCP"
+    echo -e "伪装\t无（none）"
+    echo -e "TLS\tReality"
+    echo -e "SNI\t$REALITY_SERVER"
+    echo -e "指纹\tchrome"
+    echo -e "公钥\t$REALITY_PUB"
+    echo -e "短ID\t$REALITY_SID"; } | _tbl
   hr
 
   echo "📌 节点4（Hysteria2 / UDP）"
-  { echo -e "Address (地址)\t$ip"
-    echo -e "Port (端口)\t$PORT_HY2"
-    echo -e "Password (密码)\t$HY2_PWD"
-    echo -e "TLS (传输层安全)\ttls"
-    echo -e "SNI (serverName)\t$REALITY_SERVER"
-    echo -e "Alpn\th3"
-    echo -e "AllowInsecure\ttrue"; } | _tbl
+  { echo -e "地址\t$ip"
+    echo -e "端口\t$PORT_HY2"
+    echo -e "密码\t$HY2_PWD"
+    echo -e "TLS\tTLS（自签名）"
+    echo -e "SNI\t$REALITY_SERVER"
+    echo -e "ALPN\th3"
+    echo -e "跳过证书验证\ttrue"; } | _tbl
   hr
 
   echo "📌 节点5（VMess WS / TCP）"
-  { echo -e "Address (地址)\t$ip"
-    echo -e "Port (端口)\t$PORT_VMESS_WS"
-    echo -e "UUID (用户ID)\t$UUID"
+  { echo -e "地址\t$ip"
+    echo -e "端口\t$PORT_VMESS_WS"
+    echo -e "UUID\t$UUID"
     echo -e "AlterID\t0"
-    echo -e "network (传输)\tws"
-    echo -e "Path (路径)\t$VMESS_WS_PATH"
-    echo -e "TLS\tnone"; } | _tbl
+    echo -e "传输\tWebSocket"
+    echo -e "路径\t$VMESS_WS_PATH"
+    echo -e "TLS\t无"; } | _tbl
   hr
 }
 
-########################  分享链接  ########################
+########################  分享链接（节点名按你要求）  ########################
 print_links(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
-  local NAME_BASE="sbdk"; local links=()
+  local links=()
 
-  links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-vlessr")
-  links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#${NAME_BASE}-grpcr")
-  links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-trojanr")
-  links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
+  links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality")
+  links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
+  links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
+  links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#hysteria2")
 
   local VMESS_JSON; VMESS_JSON=$(cat <<JSON
-{"v":"2","ps":"${NAME_BASE}-vmessws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
+{"v":"2","ps":"vmess-ws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
 JSON
 )
   links+=("vmess://$(printf "%s" "$VMESS_JSON" | base64 -w 0 2>/dev/null || printf "%s" "$VMESS_JSON" | base64 | tr -d '\n')")
 
-  echo -e "${C_BLUE}${C_BOLD}分享链接（可导入 v2rayN）${C_RESET}"
+  echo -e "${C_BLUE}${C_BOLD}分享链接（可直接导入 v2rayN）${C_RESET}"
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
 }
 
-########################  状态块  ########################
+########################  状态块（中文表头）  ########################
 show_status_block(){
   load_env; load_ports || true
   local ip; ip=$(get_ip)
   echo -e "${C_BLUE}${C_BOLD}运行状态${C_RESET}"
   hr
-  docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  # 中文表头 + 对齐
+  { echo -e "名称\t镜像\t状态"
+    docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Names}}\t{{.Image}}\t{{.Status}}"; } \
+  | column -t -s $'\t'
   hr
   echo -e "${C_DIM}配置目录:${C_RESET} $SB_DIR"
-  echo -e "${C_DIM}服务器IP:${C_RESET} $ip"
+  echo -e "${C_DIM}服务器 IP:${C_RESET} $ip"
   echo
   echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"
   hr
   echo "  - VLESS Reality (TCP):      ${PORT_VLESSR:-?}"
-  echo "  - VLESS gRPC Reality (TCP): ${PORT_VLESS_GRPCR:-?}  service: $GRPC_SERVICE"
+  echo "  - VLESS gRPC Reality (TCP): ${PORT_VLESS_GRPCR:-?}  服务名: $GRPC_SERVICE"
   echo "  - Trojan Reality (TCP):     ${PORT_TROJANR:-?}"
   echo "  - Hysteria2 (UDP):          ${PORT_HY2:-?}"
   echo "  - VMess WS (TCP):           ${PORT_VMESS_WS:-?}  路径: $VMESS_WS_PATH"
@@ -426,19 +420,19 @@ show_status_block(){
 ########################  中文系统状态条  ########################
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 status_bar(){
-  # Docker
-  local docker_stat
+  local docker_stat bbr_stat sbox_stat raw
   if command -v docker >/dev/null 2>&1; then
     if systemctl is-active --quiet docker 2>/dev/null || pgrep -x dockerd >/dev/null; then docker_stat="${OK} 运行中"; else docker_stat="${NO} 未运行"; fi
   else docker_stat="${NO} 未安装"; fi
-  # BBR
-  local cc qd bbr_stat; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+
+  local cc qd; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
   qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
   if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
-  # Sing-Box 容器
-  local sbox_stat raw; if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
+
+  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
   case "$raw" in running)sbox_stat="${OK} 运行中";; exited)sbox_stat="${NO} 已停止";; created)sbox_stat="${NO} 未启动";;
     restarting)sbox_stat="${WAIT} 重启中";; paused)sbox_stat="${NO} 已暂停";; none|*)sbox_stat="${NO} 未部署";; esac
+
   echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
 }
 
@@ -490,9 +484,9 @@ uninstall_all(){
   echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
-########################  菜单（含中文系统状态）  ########################
+########################  菜单（系统状态移到菜单下方）  ########################
 menu(){
-  fix_tty; banner; status_bar
+  fix_tty; banner
   echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
   echo -e "  ${C_GREEN}1)${C_RESET} 安装 Sing-Box"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
@@ -504,6 +498,8 @@ menu(){
   echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
+  # —— 系统状态放在菜单下方、选择操作上方 ——
+  status_bar
   read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
   [[ -z "${op:-}" ]] && exit 0
   case "$op" in
