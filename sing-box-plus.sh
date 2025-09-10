@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------
-# Sing-Box Docker Manager (Multi-Protocol, No-Cert)
+# Sing-Box Docker Manager (Multi-Protocol, Reality + HY2/TUIC with self-signed TLS)
 # Author: Alvin9999
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.1.0"
+SCRIPT_VERSION="v1.2.0"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -19,16 +19,16 @@ banner(){
   echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"
   hr
   if [[ -f /etc/os-release ]]; then . /etc/os-release; echo -e "${C_DIM}OS:${C_RESET} $PRETTY_NAME"; fi
-  echo -e "${C_DIM}Time:${C_RESET} $(date '+%F %T')"
+  echo -e "${C_DIM}Time:${CRESET} $(date '+%F %T')"
   hr
 }
 
-########################  默认项（首装就全开）  ########################
+########################  默认项（首次全开）  ########################
 SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 全部协议默认开启（一次性全部生成）
+# 首次就全协议生成（包含 HY2/TUIC）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_H2R=${ENABLE_VLESS_H2R:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
@@ -37,9 +37,9 @@ ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-true}
-ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}  # 明文WS，仍默认开（首装“全开”符合你的要求）
+ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}  # 明文，仅为“全生成”要求
 
-# Reality 握手目标
+# Reality 握手目标（随意常见大站）
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 
@@ -69,7 +69,7 @@ detect_os(){
   esac
 }
 
-ensure_dirs(){ mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools"; chmod 700 "$SB_DIR"; }
+ensure_dirs(){ mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools" "$SB_DIR/cert"; chmod 700 "$SB_DIR"; }
 dcomp(){ if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
 get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
 
@@ -85,6 +85,10 @@ install_docker(){
     info "安装 Docker Compose 插件 ..."
     apt-get update -y && apt-get install -y docker-compose-plugin || true
   fi
+  # 生成证书需要 openssl
+  if ! command -v openssl >/dev/null 2>&1; then
+    apt-get update -y && apt-get install -y openssl >/dev/null 2>&1 || true
+  fi
 }
 
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
@@ -94,6 +98,18 @@ rand_b64_32(){
 }
 gen_uuid(){ docker run --rm "$IMAGE" generate uuid; }
 gen_reality(){ docker run --rm "$IMAGE" generate reality-keypair; }
+
+# 自签证书（用于 HY2 / TUIC 服务端）
+mk_cert(){
+  local crt="$SB_DIR/cert/fullchain.pem" key="$SB_DIR/cert/key.pem"
+  if [[ ! -s "$crt" || ! -s "$key" ]]; then
+    info "生成自签证书（ECC，10年）..."
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      -days 3650 -nodes -keyout "$key" -out "$crt" \
+      -subj "/CN=$REALITY_SERVER" \
+      -addext "subjectAltName=DNS:$REALITY_SERVER" >/dev/null 2>&1
+  fi
+}
 
 # 五位随机端口（10000-65535）不重复
 PORTS=()
@@ -143,16 +159,16 @@ load_creds(){ [[ -f "${SB_DIR}/creds.env" ]] && . "${SB_DIR}/creds.env" || retur
 
 save_ports(){
   cat > "${SB_DIR}/ports.env" <<EOF
-$( [[ "$ENABLE_VLESS_REALITY" == true ]]   && echo "PORT_VLESSR=$PORT_VLESSR" )
-$( [[ "$ENABLE_VLESS_H2R" == true ]]       && echo "PORT_VLESS_H2R=$PORT_VLESS_H2R" )
-$( [[ "$ENABLE_VLESS_GRPCR" == true ]]     && echo "PORT_VLESS_GRPCR=$PORT_VLESS_GRPCR" )
-$( [[ "$ENABLE_TROJAN_REALITY" == true ]]  && echo "PORT_TROJANR=$PORT_TROJANR" )
-$( [[ "$ENABLE_HYSTERIA2" == true ]]       && echo "PORT_HY2=$PORT_HY2" )
-$( [[ "$ENABLE_TUIC" == true ]]            && echo "PORT_TUIC=$PORT_TUIC" )
-$( [[ "$ENABLE_SS2022" == true ]]          && echo "PORT_SS2022=$PORT_SS2022" )
-$( [[ "$ENABLE_SHADOWTLS_SS" == true ]]    && echo "PORT_STLS=$PORT_STLS
-PORT_STLS_SS=$PORT_STLS_SS" )
-$( [[ "$ENABLE_VMESS_WS" == true ]]        && echo "PORT_VMESS_WS=$PORT_VMESS_WS" )
+PORT_VLESSR=$PORT_VLESSR
+PORT_VLESS_H2R=$PORT_VLESS_H2R
+PORT_VLESS_GRPCR=$PORT_VLESS_GRPCR
+PORT_TROJANR=$PORT_TROJANR
+PORT_HY2=$PORT_HY2
+PORT_TUIC=$PORT_TUIC
+PORT_SS2022=$PORT_SS2022
+PORT_STLS=$PORT_STLS
+PORT_STLS_SS=$PORT_STLS_SS
+PORT_VMESS_WS=$PORT_VMESS_WS
 EOF
 }
 load_ports(){ [[ -f "${SB_DIR}/ports.env" ]] && . "${SB_DIR}/ports.env" || return 1; }
@@ -171,22 +187,19 @@ enable_bbr(){
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=$cc
 EOF
-  sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null || true
-  info "BBR 设置完成（如为新装内核，重启后更稳）。"
+  sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+  info "BBR 设置完成。"
 }
 
 ########################  防火墙放行  ########################
 _open_ufw(){
-  local p proto; for p in "$@"; do
-    proto="${p#*/}"; port="${p%/*}"
-    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
-  done
+  local proto port
+  for it in "$@"; do proto="${it#*/}"; port="${it%/*}"; ufw allow "${port}/${proto}" >/dev/null 2>&1 || true; done
   ufw reload >/dev/null 2>&1 || true
 }
 _open_iptables(){
-  apt-get update -y >/dev/null 2>&1 || true
   DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
-  local port proto
+  local proto port
   for it in "$@"; do
     proto="${it#*/}"; port="${it%/*}"
     [[ "$proto" == "tcp" ]] && iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
@@ -195,20 +208,9 @@ _open_iptables(){
   netfilter-persistent save >/dev/null 2>&1 || true
 }
 open_firewall(){
-  # 组装需要放行的端口/协议
   local rules=()
-  [[ "$ENABLE_VLESS_REALITY" == true ]]  && rules+=("${PORT_VLESSR}/tcp")
-  [[ "$ENABLE_VLESS_H2R" == true ]]      && rules+=("${PORT_VLESS_H2R}/tcp")
-  [[ "$ENABLE_VLESS_GRPCR" == true ]]    && rules+=("${PORT_VLESS_GRPCR}/tcp")
-  [[ "$ENABLE_TROJAN_REALITY" == true ]] && rules+=("${PORT_TROJANR}/tcp")
-  [[ "$ENABLE_HYSTERIA2" == true ]]      && rules+=("${PORT_HY2}/udp")
-  [[ "$ENABLE_TUIC" == true ]]           && rules+=("${PORT_TUIC}/udp")
-  [[ "$ENABLE_SS2022" == true ]]         && rules+=("${PORT_SS2022}/tcp")
-  if [[ "$ENABLE_SHADOWTLS_SS" == true ]]; then
-    rules+=("${PORT_STLS}/tcp" "${PORT_STLS_SS}/tcp")
-  fi
-  [[ "$ENABLE_VMESS_WS" == true ]]       && rules+=("${PORT_VMESS_WS}/tcp")
-
+  rules+=("${PORT_VLESSR}/tcp" "${PORT_VLESS_H2R}/tcp" "${PORT_VLESS_GRPCR}/tcp" "${PORT_TROJANR}/tcp")
+  rules+=("${PORT_HY2}/udp" "${PORT_TUIC}/udp" "${PORT_SS2022}/tcp" "${PORT_STLS}/tcp" "${PORT_STLS_SS}/tcp" "${PORT_VMESS_WS}/tcp")
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q -E "Status: active|状态： 活跃"; then
     info "检测到 UFW，放行端口..."
     _open_ufw "${rules[@]}"
@@ -231,6 +233,7 @@ services:
     volumes:
       - $SB_DIR/config.json:/etc/sing-box/config.json:ro
       - $SB_DIR/data:/var/lib/sing-box
+      - $SB_DIR/cert:/etc/sing-box/cert:ro
     command: >
       -D /var/lib/sing-box
       -C /etc/sing-box
@@ -291,8 +294,11 @@ write_config(){
   [[ -z "${PORT_VMESS_WS:-}"    ]] && PORT_VMESS_WS=$(gen_port)
   save_ports
 
-  # 配置文件（全部 inbound 的 listen 改为 0.0.0.0，避免仅绑 IPv6）
-  SERVER_IP=$(get_ip)
+  # 证书（HY2/TUIC 用）
+  mk_cert
+  local CRT="/etc/sing-box/cert/fullchain.pem" KEY="/etc/sing-box/cert/key.pem"
+
+  # 配置文件（全部 listen=0.0.0.0）
   cat > "$SB_DIR/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -348,7 +354,13 @@ write_config(){
       "tag": "hy2",
       "listen": "0.0.0.0",
       "listen_port": $PORT_HY2,
-      "users": [ { "name": "hy2", "auth": "$HY2_AUTH" } ]
+      "users": [ { "name": "hy2", "auth": "$HY2_AUTH" } ],
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "certificate_path": "$CRT",
+        "key_path": "$KEY"
+      }
     },
     {
       "type": "tuic",
@@ -358,7 +370,12 @@ write_config(){
       "users": [ { "uuid": "$UUID_TUIC", "password": "$TUIC_PWD" } ],
       "congestion_control": "bbr",
       "udp_relay_mode": "native",
-      "zero_rtt_handshake": true
+      "zero_rtt_handshake": true,
+      "tls": {
+        "enabled": true,
+        "certificate_path": "$CRT",
+        "key_path": "$KEY"
+      }
     },
     {
       "type": "shadowsocks",
@@ -432,34 +449,40 @@ JSON
 verify_ports(){
   info "检查端口监听情况 ..."
   sleep 1
-  local miss=0; local line
   declare -A want=()
-  want["$PORT_VLESSR/tcp"]="VLESS Reality"
+  want["$PORT_STLS/tcp"]="ShadowTLS"
+  want["$PORT_HY2/udp"]="Hysteria2"
   want["$PORT_VLESS_H2R/tcp"]="VLESS H2 Reality"
+  want["$PORT_VLESSR/tcp"]="VLESS Reality"
+  want["$PORT_SS2022/tcp"]="SS 2022"
   want["$PORT_VLESS_GRPCR/tcp"]="VLESS gRPC Reality"
   want["$PORT_TROJANR/tcp"]="Trojan Reality"
-  want["$PORT_HY2/udp"]="Hysteria2"
-  want["$PORT_TUIC/udp"]="TUIC v5"
-  want["$PORT_SS2022/tcp"]="SS 2022"
-  want["$PORT_STLS/tcp"]="ShadowTLS"
-  want["$PORT_STLS_SS/tcp"]="ShadowTLS-SS"
   want["$PORT_VMESS_WS/tcp"]="VMess WS"
+  want["$PORT_TUIC/udp"]="TUIC v5"
+  want["$PORT_STLS_SS/tcp"]="ShadowTLS-SS"
 
+  local miss=0
   for k in "${!want[@]}"; do
     local p="${k%/*}"; local proto="${k#*/}"
-    if ss -lntu | grep -q ":${p} "; then
+    if ss -lntu | grep -q "[\:\ ]${p}\ "; then
       printf "  %-22s %s\n" "${want[$k]}" "✅ 监听 ${p}/${proto}"
     else
       printf "  %-22s %s\n" "${want[$k]}" "❌ 未监听 ${p}/${proto}"
       miss=$((miss+1))
     fi
   done
-  [[ $miss -eq 0 ]] && info "所有端口已监听。" || warn "有端口未监听：请检查 docker 日志、防火墙/安全组、或端口占用。"
+  if [[ $miss -gt 0 ]]; then
+    warn "有端口未监听：请先查看容器日志定位原因。"
+    echo "  诊断命令：docker logs -n 200 ${CONTAINER_NAME}"
+  else
+    info "所有端口已监听。"
+  fi
 }
 
 ########################  核心操作  ########################
 deploy_stack(){
   install_docker
+  ensure_dirs
   write_config
   info "启动/更新容器 ..."
   (cd "$SB_DIR" && dcomp up -d)
@@ -568,7 +591,7 @@ menu(){
   echo -e "  ${C_GREEN}5)${C_RESET} 更新外部脚本 sing-box-plus.sh"
   echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速（优先 bbr2）"
-  echo -e "  ${C_GREEN}8)${C_RESET} 卸载（停止并删除配置）"
+  echo -e "  ${C_GREEN}8)${CRESET} 卸载（停止并删除配置）"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   read -r -p "选择操作: " op
@@ -590,6 +613,5 @@ menu(){
 need_root
 detect_os
 ensure_dirs
-# 启动时自动安装 Docker，然后进入菜单（第1项就是安装/更新 Sing-Box）
 install_docker
 while true; do menu; done
