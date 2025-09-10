@@ -19,7 +19,7 @@ banner(){
   echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"
   hr
   if [[ -f /etc/os-release ]]; then . /etc/os-release; echo -e "${C_DIM}OS:${C_RESET} $PRETTY_NAME"; fi
-  echo -e "${C_DIM}Time:${CRESET} $(date '+%F %T')"
+  echo -e "${C_DIM}Time:${C_RESET} $(date '+%F %T')"
   hr
 }
 
@@ -591,7 +591,7 @@ menu(){
   echo -e "  ${C_GREEN}5)${C_RESET} 更新外部脚本 sing-box-plus.sh"
   echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速（优先 bbr2）"
-  echo -e "  ${C_GREEN}8)${CRESET} 卸载（停止并删除配置）"
+  echo -e "  ${C_GREEN}8)${C_RESET} 卸载（停止并删除配置）"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   read -r -p "选择操作: " op
