@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------
-# Sing-Box Docker Manager (Multi-Protocol, Reality + HY2/TUIC with self-signed TLS)
+# Sing-Box Docker Manager (Multi-Protocol; Reality + HY2/TUIC w/ self-signed TLS)
 # Author: Alvin9999
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.3.0"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -28,7 +28,7 @@ SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 首次就全协议生成（包含 HY2/TUIC）
+# 首次就全协议生成（去掉 ShadowTLS，应你要求）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_H2R=${ENABLE_VLESS_H2R:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
@@ -36,10 +36,10 @@ ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
 ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
-ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-true}
-ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}  # 明文，仅为“全生成”要求
+ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}
+ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-false}   # 永久关闭 ShadowTLS
 
-# Reality 握手目标（随意常见大站）
+# Reality 握手目标（常见大站）
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 
@@ -58,7 +58,7 @@ SYSTEMD_SERVICE="sing-box-docker.service"
 info(){ echo -e "${C_GREEN}[INFO]${C_RESET} $*"; }
 warn(){ echo -e "${C_YELLOW}[WARN]${C_RESET} $*"; }
 err(){  echo -e "${C_RED}[ERR ]${C_RESET} $*"; }
-need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：sudo bash $0"; exit 1; }; }
+need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：bash $0"; exit 1; }; }
 require_cmd(){ command -v "$1" >/dev/null 2>&1 || { err "缺少命令 $1"; exit 1; }; }
 
 detect_os(){
@@ -83,11 +83,13 @@ install_docker(){
   systemctl enable --now docker >/dev/null 2>&1 || true
   if ! dcomp version >/dev/null 2>&1; then
     info "安装 Docker Compose 插件 ..."
-    apt-get update -y && apt-get install -y docker-compose-plugin || true
+    apt-get update -y && apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true
   fi
-  # 生成证书需要 openssl
   if ! command -v openssl >/dev/null 2>&1; then
     apt-get update -y && apt-get install -y openssl >/dev/null 2>&1 || true
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    apt-get update -y && apt-get install -y jq >/dev/null 2>&1 || true
   fi
 }
 
@@ -132,8 +134,8 @@ ENABLE_TROJAN_REALITY=$ENABLE_TROJAN_REALITY
 ENABLE_HYSTERIA2=$ENABLE_HYSTERIA2
 ENABLE_TUIC=$ENABLE_TUIC
 ENABLE_SS2022=$ENABLE_SS2022
-ENABLE_SHADOWTLS_SS=$ENABLE_SHADOWTLS_SS
 ENABLE_VMESS_WS=$ENABLE_VMESS_WS
+ENABLE_SHADOWTLS_SS=$ENABLE_SHADOWTLS_SS
 REALITY_SERVER=$REALITY_SERVER
 REALITY_SERVER_PORT=$REALITY_SERVER_PORT
 GRPC_SERVICE=$GRPC_SERVICE
@@ -147,7 +149,7 @@ save_creds(){
   cat > "${SB_DIR}/creds.env" <<EOF
 UUID=$UUID
 UUID_TUIC=$UUID_TUIC
-HY2_AUTH=$HY2_AUTH
+HY2_PWD=$HY2_PWD
 TUIC_PWD=$TUIC_PWD
 SS2022_PWD=$SS2022_PWD
 REALITY_PRIV=$REALITY_PRIV
@@ -166,8 +168,6 @@ PORT_TROJANR=$PORT_TROJANR
 PORT_HY2=$PORT_HY2
 PORT_TUIC=$PORT_TUIC
 PORT_SS2022=$PORT_SS2022
-PORT_STLS=$PORT_STLS
-PORT_STLS_SS=$PORT_STLS_SS
 PORT_VMESS_WS=$PORT_VMESS_WS
 EOF
 }
@@ -187,7 +187,7 @@ enable_bbr(){
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=$cc
 EOF
-  sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+  sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null || true
   info "BBR 设置完成。"
 }
 
@@ -205,12 +205,21 @@ _open_iptables(){
     [[ "$proto" == "tcp" ]] && iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
     [[ "$proto" == "udp" ]] && iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$port" -j ACCEPT
   done
-  netfilter-persistent save >/dev/null 2>&1 || true
+  command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
 }
 open_firewall(){
   local rules=()
-  rules+=("${PORT_VLESSR}/tcp" "${PORT_VLESS_H2R}/tcp" "${PORT_VLESS_GRPCR}/tcp" "${PORT_TROJANR}/tcp")
-  rules+=("${PORT_HY2}/udp" "${PORT_TUIC}/udp" "${PORT_SS2022}/tcp" "${PORT_STLS}/tcp" "${PORT_STLS_SS}/tcp" "${PORT_VMESS_WS}/tcp")
+  [[ "$ENABLE_VLESS_REALITY" == true ]]  && rules+=("${PORT_VLESSR}/tcp")
+  [[ "$ENABLE_VLESS_H2R" == true ]]      && rules+=("${PORT_VLESS_H2R}/tcp")
+  [[ "$ENABLE_VLESS_GRPCR" == true ]]    && rules+=("${PORT_VLESS_GRPCR}/tcp")
+  [[ "$ENABLE_TROJAN_REALITY" == true ]] && rules+=("${PORT_TROJANR}/tcp")
+  [[ "$ENABLE_HYSTERIA2" == true ]]      && rules+=("${PORT_HY2}/udp")
+  [[ "$ENABLE_TUIC" == true ]]           && rules+=("${PORT_TUIC}/udp")
+  if [[ "$ENABLE_SS2022" == true ]]; then
+    rules+=("${PORT_SS2022}/tcp" "${PORT_SS2022}/udp")
+  fi
+  [[ "$ENABLE_VMESS_WS" == true ]]       && rules+=("${PORT_VMESS_WS}/tcp")
+
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q -E "Status: active|状态： 活跃"; then
     info "检测到 UFW，放行端口..."
     _open_ufw "${rules[@]}"
@@ -223,7 +232,6 @@ open_firewall(){
 ########################  配置写入  ########################
 write_compose(){
 cat > "$SB_DIR/docker-compose.yml" <<EOF
-version: "3.8"
 services:
   sing-box:
     image: $IMAGE
@@ -269,7 +277,7 @@ write_config(){
   if [[ -z "${UUID:-}" ]]; then
     info "生成凭据 ..."
     UUID=$(gen_uuid); UUID_TUIC=$(gen_uuid)
-    HY2_AUTH=$(rand_b64_32); TUIC_PWD=$(rand_b64_32); SS2022_PWD=$(rand_b64_32)
+    HY2_PWD=$(rand_b64_32); TUIC_PWD=$(rand_b64_32); SS2022_PWD=$(rand_b64_32)
     readarray -t RKP < <(gen_reality)
     REALITY_PRIV=$(printf "%s\n" "${RKP[@]}" | awk '/PrivateKey/{print $2}')
     REALITY_PUB=$(printf "%s\n" "${RKP[@]}" | awk '/PublicKey/{print $2}')
@@ -279,7 +287,7 @@ write_config(){
 
   # 端口（五位且唯一）
   PORTS=()
-  for v in PORT_VLESSR PORT_VLESS_H2R PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_TUIC PORT_SS2022 PORT_STLS PORT_STLS_SS PORT_VMESS_WS; do
+  for v in PORT_VLESSR PORT_VLESS_H2R PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_TUIC PORT_SS2022 PORT_VMESS_WS; do
     [[ -n "${!v:-}" ]] && PORTS+=("${!v}")
   done
   [[ -z "${PORT_VLESSR:-}"      ]] && PORT_VLESSR=$(gen_port)
@@ -289,8 +297,6 @@ write_config(){
   [[ -z "${PORT_HY2:-}"         ]] && PORT_HY2=$(gen_port)
   [[ -z "${PORT_TUIC:-}"        ]] && PORT_TUIC=$(gen_port)
   [[ -z "${PORT_SS2022:-}"      ]] && PORT_SS2022=$(gen_port)
-  [[ -z "${PORT_STLS:-}"        ]] && PORT_STLS=$(gen_port)
-  [[ -z "${PORT_STLS_SS:-}"     ]] && PORT_STLS_SS=$(gen_port)
   [[ -z "${PORT_VMESS_WS:-}"    ]] && PORT_VMESS_WS=$(gen_port)
   save_ports
 
@@ -354,10 +360,9 @@ write_config(){
       "tag": "hy2",
       "listen": "0.0.0.0",
       "listen_port": $PORT_HY2,
-      "users": [ { "name": "hy2", "auth": "$HY2_AUTH" } ],
+      "users": [ { "name": "hy2", "password": "$HY2_PWD" } ],
       "tls": {
         "enabled": true,
-        "alpn": ["h3"],
         "certificate_path": "$CRT",
         "key_path": "$KEY"
       }
@@ -369,8 +374,6 @@ write_config(){
       "listen_port": $PORT_TUIC,
       "users": [ { "uuid": "$UUID_TUIC", "password": "$TUIC_PWD" } ],
       "congestion_control": "bbr",
-      "udp_relay_mode": "native",
-      "zero_rtt_handshake": true,
       "tls": {
         "enabled": true,
         "certificate_path": "$CRT",
@@ -382,23 +385,6 @@ write_config(){
       "tag": "ss2022",
       "listen": "0.0.0.0",
       "listen_port": $PORT_SS2022,
-      "method": "2022-blake3-aes-256-gcm",
-      "password": "$SS2022_PWD"
-    },
-    {
-      "type": "shadowtls",
-      "tag": "shadowtls",
-      "listen": "0.0.0.0",
-      "listen_port": $PORT_STLS,
-      "version": 3,
-      "handshake": { "server": "$REALITY_SERVER", "server_port": $REALITY_SERVER_PORT },
-      "detour": "stls-ss"
-    },
-    {
-      "type": "shadowsocks",
-      "tag": "stls-ss",
-      "listen": "0.0.0.0",
-      "listen_port": $PORT_STLS_SS,
       "method": "2022-blake3-aes-256-gcm",
       "password": "$SS2022_PWD"
     },
@@ -415,6 +401,10 @@ write_config(){
 }
 EOF
 
+  # 二次清理（保险）：移除 ShadowTLS，如有历史残留
+  jq '.inbounds = [ .inbounds[] | select(.type!="shadowtls" and .tag!="stls-ss") ]' \
+    "$SB_DIR/config.json" > "$SB_DIR/config.json.tmp" && mv "$SB_DIR/config.json.tmp" "$SB_DIR/config.json"
+
   write_compose
   write_systemd
   save_env
@@ -430,10 +420,9 @@ print_links(){
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_H2R}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=http&path=${H2_PATH}#${NAME_BASE}-h2r")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#${NAME_BASE}-grpcr")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-trojanr")
-  links+=("hy2://${HY2_AUTH}@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
-  links+=("tuic://${UUID_TUIC}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&udp_relay_mode=native&alpn=h3#${NAME_BASE}-tuic")
+  links+=("hy2://${HY2_PWD}@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
+  links+=("tuic://${UUID_TUIC}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3#${NAME_BASE}-tuic")
   links+=("ss://2022-blake3-aes-256-gcm:$(b64url_strip "${SS2022_PWD}")@${ip}:${PORT_SS2022}#${NAME_BASE}-ss2022")
-  links+=("shadowtls://${ip}:${PORT_STLS}?server=${REALITY_SERVER}:${REALITY_SERVER_PORT}  ← 先连此，再连本机 SS(${PORT_STLS_SS})")
   local VMESS_JSON
   VMESS_JSON=$(cat <<JSON
 {"v":"2","ps":"${NAME_BASE}-vmessws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
@@ -450,16 +439,15 @@ verify_ports(){
   info "检查端口监听情况 ..."
   sleep 1
   declare -A want=()
-  want["$PORT_STLS/tcp"]="ShadowTLS"
-  want["$PORT_HY2/udp"]="Hysteria2"
-  want["$PORT_VLESS_H2R/tcp"]="VLESS H2 Reality"
   want["$PORT_VLESSR/tcp"]="VLESS Reality"
-  want["$PORT_SS2022/tcp"]="SS 2022"
+  want["$PORT_VLESS_H2R/tcp"]="VLESS H2 Reality"
   want["$PORT_VLESS_GRPCR/tcp"]="VLESS gRPC Reality"
   want["$PORT_TROJANR/tcp"]="Trojan Reality"
-  want["$PORT_VMESS_WS/tcp"]="VMess WS"
+  want["$PORT_HY2/udp"]="Hysteria2"
   want["$PORT_TUIC/udp"]="TUIC v5"
-  want["$PORT_STLS_SS/tcp"]="ShadowTLS-SS"
+  want["$PORT_SS2022/tcp"]="SS 2022 (TCP)"
+  want["$PORT_SS2022/udp"]="SS 2022 (UDP)"
+  want["$PORT_VMESS_WS/tcp"]="VMess WS"
 
   local miss=0
   for k in "${!want[@]}"; do
@@ -484,6 +472,11 @@ deploy_stack(){
   install_docker
   ensure_dirs
   write_config
+  # 启动前配置预检（带证书）
+  docker run --rm \
+    -v "$SB_DIR/config.json:/config.json:ro" \
+    -v "$SB_DIR/cert:/etc/sing-box/cert:ro" \
+    "$IMAGE" check -c /config.json
   info "启动/更新容器 ..."
   (cd "$SB_DIR" && dcomp up -d)
   systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
@@ -505,15 +498,14 @@ show_status(){
   echo
   echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"
   hr
-  echo "  - VLESS Reality (TCP):      $PORT_VLESSR"
-  echo "  - VLESS H2 Reality (TCP):   $PORT_VLESS_H2R   路径: $H2_PATH"
-  echo "  - VLESS gRPC Reality (TCP): $PORT_VLESS_GRPCR service: $GRPC_SERVICE"
-  echo "  - Trojan Reality (TCP):     $PORT_TROJANR"
-  echo "  - Hysteria2 (UDP):          $PORT_HY2"
-  echo "  - TUIC v5 (UDP):            $PORT_TUIC"
-  echo "  - Shadowsocks 2022 (TCP):   $PORT_SS2022"
-  echo "  - ShadowTLS (TCP):          $PORT_STLS  -> 本机SS: $PORT_STLS_SS"
-  echo "  - VMess WS 明文 (TCP):      $PORT_VMESS_WS   路径: $VMESS_WS_PATH"
+  [[ "$ENABLE_VLESS_REALITY" == true ]]  && echo "  - VLESS Reality (TCP):      $PORT_VLESSR"
+  [[ "$ENABLE_VLESS_H2R" == true ]]      && echo "  - VLESS H2 Reality (TCP):   $PORT_VLESS_H2R   路径: $H2_PATH"
+  [[ "$ENABLE_VLESS_GRPCR" == true ]]    && echo "  - VLESS gRPC Reality (TCP): $PORT_VLESS_GRPCR service: $GRPC_SERVICE"
+  [[ "$ENABLE_TROJAN_REALITY" == true ]] && echo "  - Trojan Reality (TCP):     $PORT_TROJANR"
+  [[ "$ENABLE_HYSTERIA2" == true ]]      && echo "  - Hysteria2 (UDP):          $PORT_HY2"
+  [[ "$ENABLE_TUIC" == true ]]           && echo "  - TUIC v5 (UDP):            $PORT_TUIC"
+  [[ "$ENABLE_SS2022" == true ]]         && echo "  - Shadowsocks 2022 (TCP/UDP): $PORT_SS2022"
+  [[ "$ENABLE_VMESS_WS" == true ]]       && echo "  - VMess WS 明文 (TCP):      $PORT_VMESS_WS   路径: $VMESS_WS_PATH"
   hr
   print_links
 }
@@ -558,10 +550,14 @@ rotate_ports(){
   PORTS=()
   PORT_VLESSR=$(gen_port); PORT_VLESS_H2R=$(gen_port); PORT_VLESS_GRPCR=$(gen_port)
   PORT_TROJANR=$(gen_port); PORT_HY2=$(gen_port); PORT_TUIC=$(gen_port)
-  PORT_SS2022=$(gen_port); PORT_STLS=$(gen_port); PORT_STLS_SS=$(gen_port)
-  PORT_VMESS_WS=$(gen_port)
+  PORT_SS2022=$(gen_port); PORT_VMESS_WS=$(gen_port)
   save_ports
   write_config
+  # 预检
+  docker run --rm \
+    -v "$SB_DIR/config.json:/config.json:ro" \
+    -v "$SB_DIR/cert:/etc/sing-box/cert:ro" \
+    "$IMAGE" check -c /config.json
   (cd "$SB_DIR" && dcomp up -d)
   open_firewall
   info "端口已全部更换完成（五位随机且互不重复）"
