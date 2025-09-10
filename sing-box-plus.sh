@@ -1,13 +1,33 @@
 #!/usr/bin/env bash
-# sing-box-docker.sh
-# 多协议(均无需证书) + Docker 一键部署 & 管理菜单
-# 支持：Debian / Ubuntu
-# 功能：安装Docker / 部署 / 查看状态 / 重启 / 更新镜像 / 更新外部脚本 / 一键换端口 / 卸载
+# -------------------------------------------------------
+# Sing-Box Docker Manager (Multi-Protocol, No-Cert)
+# OS: Debian / Ubuntu
+# Version:
+SCRIPT_NAME="Sing-Box Docker Manager"
+SCRIPT_VERSION="v1.0.0"
+# -------------------------------------------------------
 set -euo pipefail
 
-########################################
-# 可调默认项
-########################################
+########################  彩色样式  ########################
+C_RESET="\033[0m"
+C_BOLD="\033[1m"
+C_DIM="\033[2m"
+C_RED="\033[31m"
+C_GREEN="\033[32m"
+C_YELLOW="\033[33m"
+C_BLUE="\033[34m"
+C_CYAN="\033[36m"
+hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
+banner(){
+  clear
+  echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"
+  hr
+  if [[ -f /etc/os-release ]]; then . /etc/os-release; echo -e "${C_DIM}OS:${C_RESET} $PRETTY_NAME"; fi
+  echo -e "${C_DIM}Time:${C_RESET} $(date '+%F %T')"
+  hr
+}
+
+########################  默认项  ########################
 SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
@@ -21,9 +41,9 @@ ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SHADOWTLS_SS=${ENABLE_SHADOWTLS_SS:-false}
-ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-false}  # 明文，仅测试用
+ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-false}  # 明文，仅测试
 
-# Reality 公共握手目标
+# Reality 握手目标
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 
@@ -38,12 +58,10 @@ PLUS_LOCAL="${SB_DIR}/tools/sing-box-plus.sh"
 
 SYSTEMD_SERVICE="sing-box-docker.service"
 
-########################################
-# 基础函数
-########################################
-info(){ echo -e "\033[1;32m[INFO]\033[0m $*"; }
-warn(){ echo -e "\033[1;33m[WARN]\033[0m $*"; }
-err(){  echo -e "\033[1;31m[ERR ]\033[0m $*"; }
+########################  工具函数  ########################
+info(){ echo -e "${C_GREEN}[INFO]${C_RESET} $*"; }
+warn(){ echo -e "${C_YELLOW}[WARN]${C_RESET} $*"; }
+err(){  echo -e "${C_RED}[ERR ]${C_RESET} $*"; }
 need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：sudo bash $0"; exit 1; }; }
 require_cmd(){ command -v "$1" >/dev/null 2>&1 || { err "缺少命令 $1"; exit 1; }; }
 
@@ -55,12 +73,9 @@ detect_os(){
   esac
 }
 
+ensure_dirs(){ mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools"; chmod 700 "$SB_DIR"; }
 dcomp(){ if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
-
-ensure_dirs(){
-  mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools"
-  chmod 700 "$SB_DIR"
-}
+get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
 
 install_docker(){
   if ! command -v docker >/dev/null 2>&1; then
@@ -76,14 +91,11 @@ install_docker(){
   fi
 }
 
-get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
-
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
 rand_b64_32(){
   if command -v openssl >/dev/null 2>&1; then openssl rand -base64 32 | tr -d '\n'
   else dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n'; fi
 }
-
 gen_uuid(){ docker run --rm "$IMAGE" generate uuid; }
 gen_reality(){ docker run --rm "$IMAGE" generate reality-keypair; }
 
@@ -93,9 +105,7 @@ gen_port(){
   while :; do
     p=$(( ( RANDOM % 55536 ) + 10000 ))
     [[ $p -gt 65535 ]] && continue
-    if [[ ! " ${PORTS[*]} " =~ " $p " ]]; then
-      PORTS+=("$p"); echo "$p"; return
-    fi
+    if [[ ! " ${PORTS[*]} " =~ " $p " ]]; then PORTS+=("$p"); echo "$p"; return; fi
   done
 }
 
@@ -119,7 +129,6 @@ H2_PATH=$H2_PATH
 VMESS_WS_PATH=$VMESS_WS_PATH
 EOF
 }
-
 load_env(){ [[ -f "${SB_DIR}/env.conf" ]] && . "${SB_DIR}/env.conf" || true; }
 
 save_creds(){
@@ -134,7 +143,6 @@ REALITY_PUB=$REALITY_PUB
 REALITY_SID=$REALITY_SID
 EOF
 }
-
 load_creds(){ [[ -f "${SB_DIR}/creds.env" ]] && . "${SB_DIR}/creds.env" || return 1; }
 
 save_ports(){
@@ -151,15 +159,29 @@ PORT_STLS_SS=$PORT_STLS_SS" )
 $( [[ "$ENABLE_VMESS_WS" == true ]]        && echo "PORT_VMESS_WS=$PORT_VMESS_WS" )
 EOF
 }
-
 load_ports(){ [[ -f "${SB_DIR}/ports.env" ]] && . "${SB_DIR}/ports.env" || return 1; }
 
 b64url(){ printf "%s" "$1" | base64 -w 0 2>/dev/null || printf "%s" "$1" | base64; }
 b64url_strip(){ b64url "$1" | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
 
-########################################
-# 写入配置 & compose & systemd
-########################################
+########################  BBR 加速  ########################
+enable_bbr(){
+  info "开启 BBR 加速（自动优先 bbr2，不可用则使用 bbr）..."
+  modprobe tcp_bbr 2>/dev/null || true
+  local avail cc="bbr"
+  avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
+  if echo "$avail" | grep -qw bbr2; then cc="bbr2"; fi
+  cat > /etc/sysctl.d/99-bbr.conf <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=$cc
+EOF
+  sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null || true
+  echo -e "${C_DIM}当前拥塞算法:${C_RESET} $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+  echo -e "${C_DIM}默认队列:${C_RESET}      $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+  info "BBR 设置完成（如为新装内核，重启后生效更稳）。"
+}
+
+########################  配置写入  ########################
 write_compose(){
 cat > "$SB_DIR/docker-compose.yml" <<EOF
 version: "3.8"
@@ -201,16 +223,13 @@ systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
+  docker pull "$IMAGE" >/dev/null
 
-  # 如无凭据则生成
+  # 凭据
   if [[ -z "${UUID:-}" ]]; then
     info "生成凭据 ..."
-    docker pull "$IMAGE" >/dev/null
-    UUID=$(gen_uuid)
-    UUID_TUIC=$(gen_uuid)
-    HY2_AUTH=$(rand_b64_32)
-    TUIC_PWD=$(rand_b64_32)
-    SS2022_PWD=$(rand_b64_32)
+    UUID=$(gen_uuid); UUID_TUIC=$(gen_uuid)
+    HY2_AUTH=$(rand_b64_32); TUIC_PWD=$(rand_b64_32); SS2022_PWD=$(rand_b64_32)
     readarray -t RKP < <(gen_reality)
     REALITY_PRIV=$(printf "%s\n" "${RKP[@]}" | awk '/PrivateKey/{print $2}')
     REALITY_PUB=$(printf "%s\n" "${RKP[@]}" | awk '/PublicKey/{print $2}')
@@ -218,19 +237,11 @@ write_config(){
     save_creds
   fi
 
-  # 如无端口则分配（五位数且互不重复）
+  # 端口（五位且唯一）
   PORTS=()
-  [[ -n "${PORT_VLESSR:-}"      ]] && PORTS+=("$PORT_VLESSR")
-  [[ -n "${PORT_VLESS_H2R:-}"   ]] && PORTS+=("$PORT_VLESS_H2R")
-  [[ -n "${PORT_VLESS_GRPCR:-}" ]] && PORTS+=("$PORT_VLESS_GRPCR")
-  [[ -n "${PORT_TROJANR:-}"     ]] && PORTS+=("$PORT_TROJANR")
-  [[ -n "${PORT_HY2:-}"         ]] && PORTS+=("$PORT_HY2")
-  [[ -n "${PORT_TUIC:-}"        ]] && PORTS+=("$PORT_TUIC")
-  [[ -n "${PORT_SS2022:-}"      ]] && PORTS+=("$PORT_SS2022")
-  [[ -n "${PORT_STLS:-}"        ]] && PORTS+=("$PORT_STLS")
-  [[ -n "${PORT_STLS_SS:-}"     ]] && PORTS+=("$PORT_STLS_SS")
-  [[ -n "${PORT_VMESS_WS:-}"    ]] && PORTS+=("$PORT_VMESS_WS")
-
+  for v in PORT_VLESSR PORT_VLESS_H2R PORT_VLESS_GRPCR PORT_TROJANR PORT_HY2 PORT_TUIC PORT_SS2022 PORT_STLS PORT_STLS_SS PORT_VMESS_WS; do
+    [[ -n "${!v:-}" ]] && PORTS+=("${!v}")
+  done
   [[ "$ENABLE_VLESS_REALITY" == true   && -z "${PORT_VLESSR:-}"      ]] && PORT_VLESSR=$(gen_port)
   [[ "$ENABLE_VLESS_H2R" == true       && -z "${PORT_VLESS_H2R:-}"   ]] && PORT_VLESS_H2R=$(gen_port)
   [[ "$ENABLE_VLESS_GRPCR" == true     && -z "${PORT_VLESS_GRPCR:-}" ]] && PORT_VLESS_GRPCR=$(gen_port)
@@ -245,9 +256,8 @@ write_config(){
   [[ "$ENABLE_VMESS_WS" == true        && -z "${PORT_VMESS_WS:-}"    ]] && PORT_VMESS_WS=$(gen_port)
   save_ports
 
+  # 配置文件
   SERVER_IP=$(get_ip)
-
-  # 写入 config.json
   cat > "$SB_DIR/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -433,9 +443,7 @@ EOF
   save_env
 }
 
-########################################
-# 共享链接输出
-########################################
+########################  分享链接输出  ########################
 print_links(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
@@ -461,14 +469,13 @@ JSON
     links+=("vmess://$(b64url "$VMESS_JSON" | tr -d '\n')")
   fi
 
-  echo
-  echo "=== 分享链接（可导入 v2rayN） ==="
+  echo -e "${C_BLUE}${C_BOLD}分享链接（可导入 v2rayN）${C_RESET}"
+  hr
   for l in "${links[@]}"; do echo "  $l"; done
+  hr
 }
 
-########################################
-# 主要操作
-########################################
+########################  核心操作  ########################
 deploy_stack(){
   install_docker
   write_config
@@ -482,14 +489,15 @@ deploy_stack(){
 show_status(){
   load_env; load_ports || true
   local ip; ip=$(get_ip)
-  echo
-  echo "=== 运行状态 ==="
+  echo -e "${C_BLUE}${C_BOLD}运行状态${C_RESET}"
+  hr
   docker ps --filter "name=${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+  hr
+  echo -e "${C_DIM}配置目录:${C_RESET} $SB_DIR"
+  echo -e "${C_DIM}服务器IP:${C_RESET} $ip"
   echo
-  echo "配置目录: $SB_DIR"
-  echo "服务器IP : $ip"
-  echo
-  echo "已启用协议与端口："
+  echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"
+  hr
   [[ "$ENABLE_VLESS_REALITY" == true ]]   && echo "  - VLESS Reality (TCP):      $PORT_VLESSR"
   [[ "$ENABLE_VLESS_H2R" == true ]]       && echo "  - VLESS H2 Reality (TCP):   $PORT_VLESS_H2R   路径: $H2_PATH"
   [[ "$ENABLE_VLESS_GRPCR" == true ]]     && echo "  - VLESS gRPC Reality (TCP): $PORT_VLESS_GRPCR service: $GRPC_SERVICE"
@@ -499,26 +507,20 @@ show_status(){
   [[ "$ENABLE_SS2022" == true ]]          && echo "  - Shadowsocks 2022 (TCP):   $PORT_SS2022"
   [[ "$ENABLE_SHADOWTLS_SS" == true ]]    && echo "  - ShadowTLS (TCP):          $PORT_STLS  -> 本机SS: $PORT_STLS_SS"
   [[ "$ENABLE_VMESS_WS" == true ]]        && echo "  - VMess WS 明文 (TCP):      $PORT_VMESS_WS   路径: $VMESS_WS_PATH"
+  hr
   print_links
 }
 
-restart_stack(){
-  load_env
-  info "重启容器 ..."
-  (cd "$SB_DIR" && dcomp restart)
-  info "完成"
-}
+restart_stack(){ load_env; info "重启容器 ..."; (cd "$SB_DIR" && dcomp restart); info "完成"; }
 
 update_image(){
-  load_env
-  install_docker
-  require_cmd docker
+  load_env; install_docker; require_cmd docker
   info "检查 sing-box 镜像更新 ..."
   local before after
-  before=$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "none")
-  docker pull "$IMAGE" >/dev/null
+  before=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
+  docker pull "$IMAGE" >/dev/null || true
   (cd "$SB_DIR" && dcomp up -d)
-  after=$(docker inspect -f '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "none")
+  after=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
   if [[ "$before" == "$after" ]]; then
     info "当前已是最新版（$IMAGE）"
   else
@@ -576,41 +578,39 @@ uninstall_all(){
   info "已卸载"
 }
 
-########################################
-# 菜单
-########################################
+########################  菜单  ########################
 menu(){
-  clear
-  cat <<'EOF'
-================= Sing-Box Docker 管理 =================
-1) 安装/更新 Docker
-2) 部署/更新 Sing-Box (生成配置并启动)
-3) 查看状态 & 分享链接
-4) 重启容器
-5) 一键更新 Sing-Box Docker 镜像到最新版
-6) 一键更新外部脚本 sing-box-plus.sh
-7) 一键更换所有端口（五位随机且互不重复）
-8) 卸载（停止并删除配置）
-0) 退出
-========================================================
-EOF
+  banner
+  echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
+  echo -e "  ${C_GREEN}1)${C_RESET} 部署/更新 Sing-Box（生成配置并启动）"
+  echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
+  echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
+  echo -e "  ${C_GREEN}4)${C_RESET} 一键更新 Sing-Box Docker 镜像"
+  echo -e "  ${C_GREEN}5)${C_RESET} 一键更新外部脚本 sing-box-plus.sh"
+  echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
+  echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速（优先 bbr2）"
+  echo -e "  ${C_GREEN}8)${C_RESET} 卸载（停止并删除配置）"
+  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
+  echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   read -r -p "选择操作: " op
   case "$op" in
-    1) install_docker; read -r -p "按回车继续..." _;;
-    2) deploy_stack;   read -r -p "按回车继续..." _;;
-    3) show_status;    read -r -p "按回车继续..." _;;
-    4) restart_stack;  read -r -p "按回车继续..." _;;
-    5) update_image;   read -r -p "按回车继续..." _;;
-    6) update_plus_script; read -r -p "按回车继续..." _;;
-    7) rotate_ports;   read -r -p "按回车继续..." _;;
-    8) uninstall_all;  read -r -p "按回车继续..." _;;
+    1) deploy_stack; read -r -p "回车返回菜单..." _;;
+    2) show_status;  read -r -p "回车返回菜单..." _;;
+    3) restart_stack;read -r -p "回车返回菜单..." _;;
+    4) update_image; read -r -p "回车返回菜单..." _;;
+    5) update_plus_script; read -r -p "回车返回菜单..." _;;
+    6) rotate_ports; read -r -p "回车返回菜单..." _;;
+    7) enable_bbr;   read -r -p "回车返回菜单..." _;;
+    8) uninstall_all;read -r -p "回车返回菜单..." _;;
     0) exit 0;;
     *) echo "无效选项"; sleep 1;;
   esac
 }
 
-########################################
-# 主入口
-########################################
-need_root; detect_os; ensure_dirs
+########################  主入口  ########################
+need_root
+detect_os
+ensure_dirs
+# 启动时自动安装 Docker，安装完进入菜单：
+install_docker
 while true; do menu; done
