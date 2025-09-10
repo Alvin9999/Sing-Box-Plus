@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.3.3"
+SCRIPT_VERSION="v1.3.4"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -21,6 +21,22 @@ banner(){
   if [[ -f /etc/os-release ]]; then . /etc/os-release; echo -e "${C_DIM}OS:${C_RESET} $PRETTY_NAME"; fi
   echo -e "${C_DIM}Time:${C_RESET} $(date '+%F %T')"
   hr
+}
+
+########################  输入修复（退格可用）  ########################
+READ_OPTS=(-e -r)  # -e 启用 readline（退格/左右键可用），-r 原样读取
+fix_tty(){
+  # 修正终端 erase 键，兼容 ^?（DEL, 127）与 ^H（BS, 8）
+  if [[ -t 0 && -t 1 ]]; then
+    stty sane 2>/dev/null || true
+    local kbs
+    kbs=$(tput kbs 2>/dev/null || echo '^?')
+    case "$kbs" in
+      $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
+      $'\b'|'^H')   stty erase '^H' 2>/dev/null || true ;;
+      *)            stty erase '^?' 2>/dev/null || true ;;
+    esac
+  fi
 }
 
 ########################  开关与默认项  ########################
@@ -254,7 +270,7 @@ systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 }
 
 ensure_creds(){
-  # 兼容旧的 creds.env：缺谁补谁（按需静默生成，不打印“生成凭据 ...”）
+  # 静默保证凭据齐备（不打印“生成凭据 ...”）
   [[ -z "${UUID:-}"       ]] && UUID=$(gen_uuid)
   [[ -z "${HY2_PWD:-}"    ]] && HY2_PWD=$(rand_b64_32)
   if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]]; then
@@ -273,7 +289,7 @@ write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
   docker pull "$IMAGE" >/dev/null
 
-  ensure_creds  # 静默保证凭据齐备
+  ensure_creds  # 静默
 
   # 端口（五位且唯一）
   PORTS=()
@@ -365,7 +381,6 @@ EOF
 ########################  分享链接输出（输出后退出脚本）  ########################
 print_links_and_quit(){
   load_env; load_creds; load_ports
-  # 兼容：若历史文件缺字段，临时补齐
   [[ -z "${HY2_PWD:-}"  ]] && HY2_PWD=$(rand_b64_32) && save_creds
 
   local ip; ip=$(get_ip)
@@ -390,8 +405,7 @@ JSON
   echo -e "${C_BLUE}${C_BOLD}分享链接（可导入 v2rayN）${C_RESET}"
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
 
-  # ✅ 输出分享链接后直接退出脚本
-  exit 0
+  exit 0   # ✅ 输出链接后直接退出脚本
 }
 
 ########################  核心操作  ########################
@@ -471,7 +485,7 @@ rotate_ports(){
   show_status_and_quit   # 输出分享链接后退出
 }
 uninstall_all(){
-  read -r -p "确认卸载并删除 ${SB_DIR} ? (y/N): " yn
+  read "${READ_OPTS[@]}" -p "确认卸载并删除 ${SB_DIR} ? (y/N): " yn
   [[ "${yn,,}" == y ]] || { echo "已取消"; return; }
   (cd "$SB_DIR" && dcomp down) || true
   systemctl disable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
@@ -483,6 +497,7 @@ uninstall_all(){
 
 ########################  菜单（回车直接退出）  ########################
 menu(){
+  fix_tty
   banner
   echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
   echo -e "  ${C_GREEN}1)${C_RESET} 安装/更新 Sing-Box（生成配置并启动）"
@@ -490,12 +505,12 @@ menu(){
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
   echo -e "  ${C_GREEN}4)${C_RESET} 更新 Sing-Box Docker 镜像"
   echo -e "  ${C_GREEN}5)${C_RESET} 更新外部脚本 sing-box-plus.sh"
-  echo -e "  ${C_GREEN}6)${CRESET} 一键更换所有端口（五位随机且互不重复）"
+  echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速（优先 bbr2）"
   echo -e "  ${C_GREEN}8)${C_RESET} 卸载（停止并删除配置）"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
-  read -r -p "选择操作（回车退出）: " op
+  read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
   [[ -z "${op:-}" ]] && exit 0     # ↩︎ 主菜单按回车，直接退出
   case "$op" in
     1) deploy_stack;;
