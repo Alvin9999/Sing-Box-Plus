@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.3.1"
+SCRIPT_VERSION="v1.3.2"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -155,7 +155,6 @@ UUID=$UUID
 UUID_TUIC=$UUID_TUIC
 HY2_PWD=$HY2_PWD
 TUIC_PWD=$TUIC_PWD
-SS2022_PWD=${SS2022_PWD:-}
 REALITY_PRIV=$REALITY_PRIV
 REALITY_PUB=$REALITY_PUB
 REALITY_SID=$REALITY_SID
@@ -275,7 +274,12 @@ ensure_creds(){
   [[ -z "${UUID_TUIC:-}"  ]] && UUID_TUIC=$(gen_uuid)
   [[ -z "${HY2_PWD:-}"    ]] && HY2_PWD=$(rand_b64_32)
   [[ -z "${TUIC_PWD:-}"   ]] && TUIC_PWD=$(rand_b64_32)
-  # SS2022 默认关闭，就不强制生成
+  [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]] && {
+    readarray -t RKP < <(gen_reality)
+    REALITY_PRIV=$(printf "%s\n" "${RKP[@]}" | awk '/PrivateKey/{print $2}')
+    REALITY_PUB=$(printf "%s\n" "${RKP[@]}" | awk '/PublicKey/{print $2}')
+    REALITY_SID=$(rand_hex8)
+  }
   save_creds
 }
 
@@ -421,15 +425,18 @@ print_links(){
   local NAME_BASE="sbdk"; local links=()
 
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-vlessr")
-  links+=("vless://${UUID}@${ip}:${PORT_VLESS_H2R}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=http&path=${H2_PATH}#${NAME_BASE}-h2r")
+
+  # H2R：补 host=REALITY_SERVER
+  links+=("vless://${UUID}@${ip}:${PORT_VLESS_H2R}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=http&host=${REALITY_SERVER}&path=${H2_PATH}#${NAME_BASE}-h2r")
+
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#${NAME_BASE}-grpcr")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#${NAME_BASE}-trojanr")
 
-  # HY2：密码做 URL 编码，带 insecure=1 & sni
+  # HY2：密码 URL 编码，带 insecure=1 & sni
   links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#${NAME_BASE}-hy2")
 
-  # TUIC：带 sni & allow_insecure=1（自签证书），保留 alpn=h3
-  links+=("tuic://${UUID_TUIC}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&sni=${REALITY_SERVER}&allow_insecure=1#${NAME_BASE}-tuic")
+  # TUIC：密码 URL 编码，带 sni & allow_insecure=1，保留 alpn=h3
+  links+=("tuic://${UUID_TUIC}:$(urlenc "${TUIC_PWD}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&sni=${REALITY_SERVER}&allow_insecure=1#${NAME_BASE}-tuic")
 
   # VMess
   local VMESS_JSON
@@ -437,7 +444,7 @@ print_links(){
 {"v":"2","ps":"${NAME_BASE}-vmessws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
 JSON
 )
-  links+=("vmess://$(b64url "$VMESS_JSON" | tr -d '\n')}")
+  links+=("vmess://$(b64url "$VMESS_JSON" | tr -d '\n')")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（可导入 v2rayN）${C_RESET}"
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
