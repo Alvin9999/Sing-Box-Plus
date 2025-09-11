@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu / CentOS / RHEL / Rocky / Alma
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.6.0"
+SCRIPT_VERSION="v1.6.1"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -15,13 +15,7 @@ C_RED="\033[31m"; C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"; : "${CRESET:=$C_RESET}"   # 兜底：防手误
 
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
-title() {
-  clear
-  # 顶部标题 + 更新地址
-  echo -e "${C_CYAN}${C_BOLD}Sing-Box 管理脚本  ${SCRIPT_VERSION}${C_RESET}  ${C_DIM}✎${C_RESET}"
-  echo -e "脚本更新地址：${C_GREEN}https://github.com/Alvin9999/Sing-Box-Plus${C_RESET}"
-  echo -e "${C_DIM}===============================================${C_RESET}"
-}
+title(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 sec(){ echo; echo -e "${C_BLUE}${C_BOLD}$*${C_RESET}"; hr; }
 ok(){  echo -e "${C_BOLD}${C_GREEN}★ $*${C_RESET}"; }
 warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
@@ -599,55 +593,19 @@ print_manual_params(){
 ########################  状态条 & 状态块  ########################
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 
-# 中文系统状态栏（set -euo pipefail 安全）
 status_bar() {
-  # 本地图标
-  local OK="${C_GREEN}✔${C_RESET}"
-  local NO="${C_RED}✘${C_RESET}"
-  local WAIT="${C_YELLOW}…${C_RESET}"
-
-  # 先给所有变量安全默认值，避免 set -u 报错
-  local docker_stat=" ${NO} 未安装"
-  local bbr_stat=" ${NO} 未启用"
-  local sbox_stat=" ${NO} 未部署"
+  local docker_stat bbr_stat sbox_stat raw cc qd
 
   # Docker 状态
   if command -v docker >/dev/null 2>&1; then
     if systemctl is-active --quiet docker 2>/dev/null || pgrep -x dockerd >/dev/null; then
-      docker_stat=" ${OK} 运行中"
+      docker_stat="${OK} 运行中"
     else
-      docker_stat=" ${NO} 未运行"
+      docker_stat="${NO} 未运行"
     fi
-  fi
-
-  # BBR 状态
-  local cc qd
-  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
-  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
-  if [[ "${cc:-}" == "bbr" ]]; then
-    bbr_stat=" ${OK} 已启用（bbr）"
   else
-    bbr_stat=" ${NO} 未启用${C_DIM}（当前: ${cc:-未知} / 队列: ${qd:-未知}）${C_RESET}"
+    docker_stat="${NO} 未安装"
   fi
-
-  # Sing-Box 容器状态
-  local cname="${CONTAINER_NAME:-sing-box}"
-  local raw="none"
-  if command -v docker >/dev/null 2>&1; then
-    raw="$(docker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null || echo none)"
-  fi
-  case "$raw" in
-    running)    sbox_stat=" ${OK} 运行中" ;;
-    exited)     sbox_stat=" ${NO} 已停止" ;;
-    created)    sbox_stat=" ${NO} 未启动" ;;
-    restarting) sbox_stat=" ${WAIT} 重启中" ;;
-    paused)     sbox_stat=" ${NO} 已暂停" ;;
-    none|*)     sbox_stat=" ${NO} 未部署" ;;
-  esac
-
-  echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
-}
-
 
   # BBR 状态
   cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
@@ -756,10 +714,9 @@ uninstall_all(){
 }
 
 ########################  菜单  ########################
-menu() {
-  title
-  # 菜单主体（彩色编号 + 中文项名）
-  echo -e "${C_BOLD}================  管 理 菜 单  ================${C_RESET}"
+menu(){
+  fix_tty; title
+  echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
   echo -e "  ${C_GREEN}1)${C_RESET} 安装 Sing-Box"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
@@ -769,31 +726,22 @@ menu() {
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速"
   echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
-  echo -e "==============================================="
-
-  # 菜单下方显示系统状态（中文）
+  echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   status_bar
-
-  # 输入提示（与截图一致）
-  echo
-  read "${READ_OPTS[@]}" -p "请输入选项 [0-8]： " opt || true
-  [[ -z "${opt:-}" ]] && exit 0
-
-  case "$opt" in
-    1) deploy ;;
-    2) show_status_and_links_then_exit; exit 0 ;;
-    3) restart_container ;;
-    4) update_image ;;
-    5) self_update ;;
-    6) reassign_ports ;;
-    7) enable_bbr ;;
-    8) uninstall_all ;;
-    0) exit 0 ;;
-    *) echo -e "${C_YELLOW}无效选项${C_RESET}" ;;
+  read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
+  [[ -z "${op:-}" ]] && exit 0
+  case "$op" in
+    1) deploy_stack;;
+    2) show_status_block; print_manual_params; print_links; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0;;
+    3) restart_stack;;
+    4) update_image;;
+    5) update_plus_script;;
+    6) rotate_ports;;
+    7) enable_bbr;;
+    8) uninstall_all;;
+    0) exit 0;;
+    *) echo "无效选项"; sleep 1;;
   esac
-
-  echo; read -p "按回车返回菜单..." _ || true
-  menu
 }
 
 ########################  主入口  ########################
