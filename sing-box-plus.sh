@@ -18,7 +18,7 @@ hr(){ printf "${C_DIM}───────────────────�
 title(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 sec(){ echo; echo -e "${C_BLUE}${C_BOLD}$*${C_RESET}"; hr; }
 ok(){  echo -e "${C_BOLD}${C_GREEN}★ $*${C_RESET}"; }
-warn(){echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
+warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
 err(){ echo -e "${C_RED}[错误]${C_RESET} $*"; }
 info(){ echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
 
