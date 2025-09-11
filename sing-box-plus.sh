@@ -126,14 +126,25 @@ rand_uuid(){ cat /proc/sys/kernel/random/uuid; }
 rand_sid(){ tr -dc a-f0-9 </dev/urandom | head -c 8; echo; }
 b64(){ printf "%s" "$1" | openssl base64 -A; }
 
-urlenc(){
-  # 主要用于 SNI，无特殊字符时原样返回
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY' "$1"; import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1])); PY "$1"
-  else
-    printf "%s" "$1"
-  fi
+# URL 编码：把非 [A-Za-z0-9._~-] 的字符转成 %XX
+urlenc() {
+  local s="$1" out="" c i
+  # LC_CTYPE=C 确保按字节处理
+  local LC_ALL_BACKUP=${LC_ALL-}; local LC_CTYPE_BACKUP=${LC_CTYPE-}
+  export LC_ALL=C LC_CTYPE=C
+  for ((i=0; i<${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
+      *) printf -v out '%s%%%02X' "$out" "'$c" ;;
+    esac
+  done
+  # 还原本地语言环境
+  [[ -n "${LC_ALL_BACKUP-}"  ]] && export LC_ALL="$LC_ALL_BACKUP"  || unset LC_ALL
+  [[ -n "${LC_CTYPE_BACKUP-}" ]] && export LC_CTYPE="$LC_CTYPE_BACKUP" || unset LC_CTYPE
+  printf '%s' "$out"
 }
+
 
 ensure_dirs(){
   mkdir -p "$SB_DIR" "$DATA_DIR" "$TOOLS_DIR" "$CERT_DIR"
