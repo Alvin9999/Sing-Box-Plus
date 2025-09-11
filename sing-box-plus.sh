@@ -15,7 +15,13 @@ C_RED="\033[31m"; C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"; : "${CRESET:=$C_RESET}"   # 兜底：防手误
 
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
-title(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
+title() {
+  clear
+  # 顶部标题 + 更新地址
+  echo -e "${C_CYAN}${C_BOLD}Sing-Box 管理脚本  ${SCRIPT_VERSION}${C_RESET}  ${C_DIM}✎${C_RESET}"
+  echo -e "脚本更新地址：${C_GREEN}https://github.com/Alvin9999/Sing-Box-Plus${C_RESET}"
+  echo -e "${C_DIM}===============================================${C_RESET}"
+}
 sec(){ echo; echo -e "${C_BLUE}${C_BOLD}$*${C_RESET}"; hr; }
 ok(){  echo -e "${C_BOLD}${C_GREEN}★ $*${C_RESET}"; }
 warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
@@ -594,18 +600,36 @@ print_manual_params(){
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 
 status_bar() {
-  local docker_stat bbr_stat sbox_stat raw cc qd
-
-  # Docker 状态
-  if command -v docker >/dev/null 2>&1; then
-    if systemctl is-active --quiet docker 2>/dev/null || pgrep -x dockerd >/dev/null; then
-      docker_stat="${OK} 运行中"
-    else
-      docker_stat="${NO} 未运行"
-    fi
+  # BBR 状态
+  local cc qd bbr_txt
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+  if [[ "$cc" == "bbr" ]]; then
+    bbr_txt="${C_GREEN}已启用 BBR${C_RESET}"
   else
-    docker_stat="${NO} 未安装"
+    bbr_txt="${C_RED}未启用${C_RESET} ${C_DIM}(当前: ${cc} / 队列: ${qd})${C_RESET}"
   fi
+
+  # Sing-Box 容器状态
+  local sbox_txt raw="未安装"
+  if command -v docker >/dev/null 2>&1; then
+    raw=$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "未安装")
+  fi
+  case "$raw" in
+    running)    sbox_txt="${C_GREEN}运行中${C_RESET}" ;;
+    created)    sbox_txt="${C_YELLOW}已创建未启动${C_RESET}" ;;
+    exited)     sbox_txt="${C_RED}已停止${C_RESET}" ;;
+    restarting) sbox_txt="${C_YELLOW}重启中${C_RESET}" ;;
+    未安装|*)   sbox_txt="${C_RED}未安装${C_RESET}" ;;
+  esac
+
+  # 两行状态，风格同截图
+  echo
+  echo -e "系统加速状态： ${bbr_txt}"
+  echo -e "Sing-Box 当前状态： ${sbox_txt}"
+  echo -e "${C_DIM}===============================================${C_RESET}"
+}
+
 
   # BBR 状态
   cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
@@ -714,9 +738,10 @@ uninstall_all(){
 }
 
 ########################  菜单  ########################
-menu(){
-  fix_tty; title
-  echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
+menu() {
+  title
+  # 菜单主体（彩色编号 + 中文项名）
+  echo -e "${C_BOLD}================  管 理 菜 单  ================${C_RESET}"
   echo -e "  ${C_GREEN}1)${C_RESET} 安装 Sing-Box"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
@@ -726,22 +751,31 @@ menu(){
   echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速"
   echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
   echo -e "  ${C_GREEN}0)${C_RESET} 退出"
-  echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
+  echo -e "==============================================="
+
+  # 菜单下方显示系统状态（中文）
   status_bar
-  read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
-  [[ -z "${op:-}" ]] && exit 0
-  case "$op" in
-    1) deploy_stack;;
-    2) show_status_block; print_manual_params; print_links; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0;;
-    3) restart_stack;;
-    4) update_image;;
-    5) update_plus_script;;
-    6) rotate_ports;;
-    7) enable_bbr;;
-    8) uninstall_all;;
-    0) exit 0;;
-    *) echo "无效选项"; sleep 1;;
+
+  # 输入提示（与截图一致）
+  echo
+  read "${READ_OPTS[@]}" -p "请输入选项 [0-8]： " opt || true
+  [[ -z "${opt:-}" ]] && exit 0
+
+  case "$opt" in
+    1) deploy ;;
+    2) show_status_and_links_then_exit; exit 0 ;;
+    3) restart_container ;;
+    4) update_image ;;
+    5) self_update ;;
+    6) reassign_ports ;;
+    7) enable_bbr ;;
+    8) uninstall_all ;;
+    0) exit 0 ;;
+    *) echo -e "${C_YELLOW}无效选项${C_RESET}" ;;
   esac
+
+  echo; read -p "按回车返回菜单..." _ || true
+  menu
 }
 
 ########################  主入口  ########################
