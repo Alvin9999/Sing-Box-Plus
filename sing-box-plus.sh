@@ -596,6 +596,9 @@ OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${
 ########################  状态条 & 状态块  ########################
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 
+########################  状态条 & 状态块  ########################
+OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
+
 status_bar() {
   local docker_stat bbr_stat sbox_stat raw cc qd
 
