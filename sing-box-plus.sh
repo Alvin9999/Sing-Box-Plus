@@ -38,13 +38,22 @@ fix_tty(){
 ########################  进度条工具  ########################
 mklog(){ mktemp -p /tmp sbplus.$(date +%s).XXXX.log; }
 
-bar_draw(){ # $1:百分比 $2:标题 $3:状态msg
-  local p=$1; ((p<0))&&p=0; ((p>100))&&p=100
-  local w=34 filled=$(( p*w/100 ))
-  local fill=$(printf "%${filled}s" | tr ' ' '█')
-  local rest=$(printf "%$((w-filled))s" | tr ' ' '░')
-  printf "\r%s [%-s%s] %3d%%  %s" "$2" "$fill" "$rest" "$p" "$3"
+bar_draw(){  # $1:百分比  $2:标题  $3:状态msg(可空)
+  local p=${1:-0} title="${2:-}" msg="${3-}"
+  ((p<0)) && p=0
+  ((p>100)) && p=100
+
+  local w=34
+  local filled=$(( p*w/100 ))
+  local unfilled=$(( w-filled ))
+
+  local fill rest
+  fill=$(printf "%${filled}s" | tr ' ' '█')
+  rest=$(printf "%${unfilled}s" | tr ' ' '░')
+
+  printf "\r%s [%s%s] %3d%%  %s" "$title" "$fill" "$rest" "$p" "$msg"
 }
+
 
 run_with_progress(){ # "描述" 预计秒数 -- 命令...
   local desc="$1"; local est=${2:-20}; shift 2
