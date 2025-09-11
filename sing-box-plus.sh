@@ -599,35 +599,53 @@ print_manual_params(){
 ########################  状态条 & 状态块  ########################
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 
+# 中文系统状态栏（set -euo pipefail 安全）
 status_bar() {
+  # 本地图标
+  local OK="${C_GREEN}✔${C_RESET}"
+  local NO="${C_RED}✘${C_RESET}"
+  local WAIT="${C_YELLOW}…${C_RESET}"
+
+  # 先给所有变量安全默认值，避免 set -u 报错
+  local docker_stat=" ${NO} 未安装"
+  local bbr_stat=" ${NO} 未启用"
+  local sbox_stat=" ${NO} 未部署"
+
+  # Docker 状态
+  if command -v docker >/dev/null 2>&1; then
+    if systemctl is-active --quiet docker 2>/dev/null || pgrep -x dockerd >/dev/null; then
+      docker_stat=" ${OK} 运行中"
+    else
+      docker_stat=" ${NO} 未运行"
+    fi
+  fi
+
   # BBR 状态
-  local cc qd bbr_txt
-  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
-  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
-  if [[ "$cc" == "bbr" ]]; then
-    bbr_txt="${C_GREEN}已启用 BBR${C_RESET}"
+  local cc qd
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
+  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
+  if [[ "${cc:-}" == "bbr" ]]; then
+    bbr_stat=" ${OK} 已启用（bbr）"
   else
-    bbr_txt="${C_RED}未启用${C_RESET} ${C_DIM}(当前: ${cc} / 队列: ${qd})${C_RESET}"
+    bbr_stat=" ${NO} 未启用${C_DIM}（当前: ${cc:-未知} / 队列: ${qd:-未知}）${C_RESET}"
   fi
 
   # Sing-Box 容器状态
-  local sbox_txt raw="未安装"
+  local cname="${CONTAINER_NAME:-sing-box}"
+  local raw="none"
   if command -v docker >/dev/null 2>&1; then
-    raw=$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || echo "未安装")
+    raw="$(docker inspect -f '{{.State.Status}}' "$cname" 2>/dev/null || echo none)"
   fi
   case "$raw" in
-    running)    sbox_txt="${C_GREEN}运行中${C_RESET}" ;;
-    created)    sbox_txt="${C_YELLOW}已创建未启动${C_RESET}" ;;
-    exited)     sbox_txt="${C_RED}已停止${C_RESET}" ;;
-    restarting) sbox_txt="${C_YELLOW}重启中${C_RESET}" ;;
-    未安装|*)   sbox_txt="${C_RED}未安装${C_RESET}" ;;
+    running)    sbox_stat=" ${OK} 运行中" ;;
+    exited)     sbox_stat=" ${NO} 已停止" ;;
+    created)    sbox_stat=" ${NO} 未启动" ;;
+    restarting) sbox_stat=" ${WAIT} 重启中" ;;
+    paused)     sbox_stat=" ${NO} 已暂停" ;;
+    none|*)     sbox_stat=" ${NO} 未部署" ;;
   esac
 
-  # 两行状态，风格同截图
-  echo
-  echo -e "系统加速状态： ${bbr_txt}"
-  echo -e "Sing-Box 当前状态： ${sbox_txt}"
-  echo -e "${C_DIM}===============================================${C_RESET}"
+  echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
 }
 
 
