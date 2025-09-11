@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu / CentOS / RHEL / Rocky / Alma
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.6.2"
+SCRIPT_VERSION="v1.6.3"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -663,14 +663,20 @@ status_bar() {
   echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
 }
 
-show_status_block(){
+show_status_block() {
   load_env; load_ports || true
-  local ip; ip=$(get_ip)
+  local ip; ip="$(get_ip)"
+
   sec "运行状态"
-  { echo -e "名称\t镜像\t状态"; docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Names}}\t{{.Image}}\t{{.Status}}"; } | column -t -s $'\t'
+  echo -e "名称\t镜像\t状态"
+  docker ps --filter "name=${CONTAINER_NAME}" \
+            --format '{{.Names}}\t{{.Image}}\t{{.Status}}' \
+  | column -t
   hr
-  echo -e "${C_DIM}配置目录:${C_RESET} $SB_DIR"
-  echo -e "${C_DIM}服务器 IP:${C_RESET} $ip"
+
+  echo -e "${C_DIM}配置目录: ${C_RESET} $SB_DIR"
+  echo -e "${C_DIM}服务器 IP: ${C_RESET} $ip"
+}
   echo
   echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"; hr
   [[ "$ENABLE_VLESS_REALITY" == true ]]  && echo "  - VLESS Reality (TCP):           ${PORT_VLESSR:-?}"
