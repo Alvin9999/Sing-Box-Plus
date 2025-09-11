@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu / CentOS / RHEL / Rocky / Alma
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.6.1"
+SCRIPT_VERSION="v1.6.2"
 # -------------------------------------------------------
 set -euo pipefail
 
