@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.4.4"
+SCRIPT_VERSION="v1.4.5"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -33,7 +33,7 @@ SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 已保留：无 h2r
+# 保留协议（不含 h2r）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
@@ -46,11 +46,9 @@ ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SS=${ENABLE_SS:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 
-# Reality 目标
+# Reality 目标 & 细节
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
-
-# 传输细节
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
 VMESS_WS_PATH=${VMESS_WS_PATH:-/vm}
 
@@ -95,7 +93,7 @@ mk_cert(){
   fi
 }
 
-########################  端口管理（五位随机且不重复）  ########################
+########################  端口（五位随机且不重复）  ########################
 PORTS=()
 gen_port(){ while :; do p=$(( ( RANDOM % 55536 ) + 10000 )); [[ $p -le 65535 ]] || continue; [[ ! " ${PORTS[*]} " =~ " $p " ]] && { PORTS+=("$p"); echo "$p"; return; }; done; }
 rand_ports_reset(){ PORTS=(); }
@@ -236,10 +234,8 @@ PORT_VLESSR=""; PORT_VLESS_GRPCR=""; PORT_TROJANR=""; PORT_HY2=""; PORT_VMESS_WS
 PORT_HY2_OBFS=""; PORT_SS2022=""; PORT_SS=""; PORT_TUIC=""
 
 ensure_creds(){
-  # UUID
   [[ -z "${UUID:-}" ]] && UUID=$(gen_uuid)
 
-  # 基础凭据
   [[ -z "${HY2_PWD:-}" ]] && HY2_PWD=$(rand_b64_32)
   if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]]; then
     readarray -t RKP < <(gen_reality)
@@ -248,13 +244,12 @@ ensure_creds(){
     REALITY_SID=$(rand_hex8)
   fi
 
-  # 新增凭据
   [[ -z "${HY2_PWD2:-}" ]]      && HY2_PWD2=$(rand_b64_32)
   [[ -z "${HY2_OBFS_PWD:-}" ]]  && HY2_OBFS_PWD=$(openssl rand -base64 16 | tr -d '\n')
   [[ -z "${SS2022_KEY:-}" ]]    && SS2022_KEY=$(rand_b64_32)
   [[ -z "${SS_PWD:-}" ]]        && SS_PWD=$(openssl rand -base64 24 | tr -d '=\n' | tr '+/' '-_')
 
-  # TUIC：按你的要求，用户ID与密码都使用 UUID（每次确保一致）
+  # TUIC：用户ID和密码都用 UUID
   TUIC_UUID="$UUID"
   TUIC_PWD="$UUID"
 
@@ -283,7 +278,6 @@ write_config(){
   mk_cert
   local CRT="/etc/sing-box/cert/fullchain.pem" KEY="/etc/sing-box/cert/key.pem"
 
-  # 生成配置
   cat > "$SB_DIR/config.json" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -377,11 +371,9 @@ write_config(){
 }
 EOF
 
-  # 清理历史残留（不再生成的旧标签）
-  jq '.inbounds = [
-        .inbounds[] |
-        select(.tag!="vless-h2r" and .tag!="stls-ss" and .type!="shadowtls")
-     ]' "$SB_DIR/config.json" > "$SB_DIR/config.json.tmp" && mv "$SB_DIR/config.json.tmp" "$SB_DIR/config.json"
+  # 清理历史残留
+  jq '.inbounds = [ .inbounds[] | select(.tag!="vless-h2r" and .tag!="stls-ss" and .type!="shadowtls") ]' \
+    "$SB_DIR/config.json" > "$SB_DIR/config.json.tmp" && mv "$SB_DIR/config.json.tmp" "$SB_DIR/config.json"
 
   write_compose
   write_systemd
@@ -394,25 +386,23 @@ print_links(){
   local ip; ip=$(get_ip)
   local links=()
 
-  # 现有
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
-  links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&sni=${REALITY_SERVER}#hysteria2")
 
-  # vmess-ws
+  # HY2 & HY2-Obfs：补全混淆密码；兼容 allowInsecure/insecure 两种写法
+  links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#hysteria2")
+  links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=$(urlenc "${HY2_OBFS_PWD}")&obfsParam=$(urlenc "${HY2_OBFS_PWD}")#hysteria2-obfs")
+
+  # VMess WS
   local VMESS_JSON; VMESS_JSON=$(cat <<JSON
 {"v":"2","ps":"vmess-ws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
 JSON
 )
   links+=("vmess://$(printf "%s" "$VMESS_JSON" | base64 -w 0 2>/dev/null || printf "%s" "$VMESS_JSON" | base64 | tr -d '\n')")
 
-  # 新增
-  links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS}?insecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=${HY2_OBFS_PWD}#hysteria2-obfs")
-  links+=("ss://2022-blake3-aes-256-gcm:${SS2022_KEY}@${ip}:${PORT_SS2022}#ss2022")
-  links+=("ss://aes-256-gcm:${SS_PWD}@${ip}:${PORT_SS}#ss")
-  # TUIC：insecure=1（多数客户端识别这个开关），密码与 UUID 一致；对密码做 URL 编码以防万一
-  links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&sni=${REALITY_SERVER}#tuic-v5")
+  # TUIC：兼容 allowInsecure / insecure 两种写法；SNI + ALPN
+  links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（可直接导入 v2rayN）${C_RESET}"
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
@@ -422,7 +412,6 @@ JSON
 print_manual_params(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
-
   echo -e "${C_BLUE}${C_BOLD}账号参数（手动填写用）${C_RESET}"
   hr
   _tbl(){ column -t -s $'\t' | sed 's/^/  /'; }
@@ -527,7 +516,7 @@ print_manual_params(){
   hr
 }
 
-########################  状态块（中文表头）  ########################
+########################  状态块  ########################
 show_status_block(){
   load_env; load_ports || true
   local ip; ip=$(get_ip)
@@ -566,7 +555,7 @@ status_bar(){
   qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
   if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
 
-  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/du/dev/null || echo "none"); else raw="none"; fi
+  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
   case "$raw" in running)sbox_stat="${OK} 运行中";; exited)sbox_stat="${NO} 已停止";; created)sbox_stat="${NO} 未启动";;
     restarting)sbox_stat="${WAIT} 重启中";; paused)sbox_stat="${NO} 已暂停";; none|*)sbox_stat="${NO} 未部署";; esac
 
@@ -623,7 +612,7 @@ uninstall_all(){
   echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
 }
 
-########################  菜单（系统状态在选择上方）  ########################
+########################  菜单  ########################
 menu(){
   fix_tty; banner
   echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
@@ -632,10 +621,10 @@ menu(){
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
   echo -e "  ${C_GREEN}4)${C_RESET} 更新 Sing-Box Docker 镜像"
   echo -e "  ${C_GREEN}5)${C_RESET} 更新脚本"
-  echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
-  echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速"
-  echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
-  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
+  echo -e "  ${C_GREEN}6)${CRESET} 一键更换所有端口（五位随机且互不重复）"
+  echo -e "  ${C_GREEN}7)${CRESET} 一键开启 BBR 加速"
+  echo -e "  ${C_GREEN}8)${CRESET} 卸载"
+  echo -e "  ${C_GREEN}0)${CRESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   status_bar
   read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
