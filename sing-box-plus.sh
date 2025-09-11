@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu / CentOS / RHEL / Rocky / Alma
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.6.7"
+SCRIPT_VERSION="v1.6.8"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -18,7 +18,7 @@ READ_OPTS=(-e -r)
 
 hr(){ printf "${C_DIM}===============================================${C_RESET}\n"; }
 ok(){  echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
-warn(){echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
+warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
 err(){ echo -e "${C_RED}[错误]${C_RESET} $*"; }
 
 fix_tty() {
