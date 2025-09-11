@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.4.6"
+SCRIPT_VERSION="v1.4.7"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -194,6 +194,12 @@ open_firewall(){
 }
 
 ########################  Compose & Systemd  ########################
+compose_up_recreate(){
+  # 强制重建，确保挂载文件变更能生效
+  (cd "$SB_DIR" && dcomp up -d --force-recreate) || {
+    warn "compose 强制重建失败，尝试重启容器"; docker restart "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  }
+}
 write_compose(){
 cat > "$SB_DIR/docker-compose.yml" <<EOF
 services:
@@ -222,7 +228,7 @@ Wants=network-online.target docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=$SB_DIR
-ExecStart=/usr/bin/env bash -c '/usr/bin/docker compose up -d || /usr/bin/docker-compose up -d'
+ExecStart=/usr/bin/env bash -c '/usr/bin/docker compose up -d --force-recreate || /usr/bin/docker-compose up -d --force-recreate'
 RemainAfterExit=yes
 
 [Install]
@@ -575,17 +581,17 @@ status_bar(){
 deploy_stack(){
   install_docker; ensure_dirs; write_config
   docker run --rm -v "$SB_DIR/config.json:/config.json:ro" -v "$SB_DIR/cert:/etc/sing-box/cert:ro" "$IMAGE" check -c /config.json
-  info "启动/更新容器 ..."; (cd "$SB_DIR" && dcomp up -d); systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  info "启动/更新容器 ..."; compose_up_recreate; systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
   open_firewall
   echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：部署完成${C_RESET}"; echo
   show_status_block; print_manual_params; print_links
   echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0
 }
-restart_stack(){ load_env; (cd "$SB_DIR" && dcomp restart); echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：容器已重启${C_RESET}"; show_status_block; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
+restart_stack(){ load_env; compose_up_recreate; echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：容器已重启${C_RESET}"; show_status_block; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
 update_image(){
   load_env; install_docker; require_cmd docker
   local before after; before=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
-  docker pull "$IMAGE" >/dev/null || true; (cd "$SB_DIR" && dcomp up -d)
+  docker pull "$IMAGE" >/dev/null || true; compose_up_recreate
   after=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
   echo; if [[ "$before" == "$after" ]]; then echo -e "${C_BOLD}${C_GREEN}★ 执行结果：当前已是最新版（$IMAGE）${C_RESET}"; else echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已更新至最新镜像（$IMAGE）${C_RESET}"; fi
   show_status_block; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
@@ -606,7 +612,7 @@ rotate_ports(){
   PORT_HY2_OBFS=$(gen_port); PORT_SS2022=$(gen_port); PORT_SS=$(gen_port); PORT_TUIC=$(gen_port)
   save_ports; write_config
   docker run --rm -v "$SB_DIR/config.json:/config.json:ro" -v "$SB_DIR/cert:/etc/sing-box/cert:ro" "$IMAGE" check -c /config.json
-  (cd "$SB_DIR" && dcomp up -d); open_firewall
+  compose_up_recreate; open_firewall
   echo -e "${C_BOLD}${C_GREEN}★ 执行结果：端口已全部更换（五位随机且互不重复）${C_RESET}"
   show_status_block; print_manual_params; print_links
   echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0
