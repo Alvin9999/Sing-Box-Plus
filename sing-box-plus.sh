@@ -17,7 +17,7 @@ set -euo pipefail
 READ_OPTS=(-e -r)
 hr(){ printf "${C_DIM}===============================================${C_RESET}\n"; }
 ok(){  echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
-warn(){echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
+warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
 err(){ echo -e "${C_RED}[错误]${C_RESET} $*"; }
 
 ########################  变量与默认  ########################
