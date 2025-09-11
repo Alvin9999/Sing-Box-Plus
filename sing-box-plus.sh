@@ -608,7 +608,7 @@ status_bar(){
     restarting) sbox_stat="${WAIT} 重启中";;
     paused)     sbox_stat="${NO} 已暂停";;
     none|*)     sbox_stat="${NO} 未部署";;
-  endac
+  esac
   echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
 }
 show_status_block(){
