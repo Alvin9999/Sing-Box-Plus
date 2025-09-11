@@ -593,6 +593,9 @@ print_manual_params(){
 ########################  状态条 & 状态块  ########################
 OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
 
+########################  状态条 & 状态块  ########################
+OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
+
 status_bar() {
   local docker_stat bbr_stat sbox_stat raw cc qd
 
@@ -606,6 +609,34 @@ status_bar() {
   else
     docker_stat="${NO} 未安装"
   fi
+
+  # BBR 状态
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+  if [[ "$cc" == "bbr" ]]; then
+    bbr_stat="${OK} 已启用（bbr）"
+  else
+    bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"
+  fi
+
+  # Sing-Box 容器状态
+  if command -v docker >/dev/null 2>&1; then
+    raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none")
+  else
+    raw="none"
+  fi
+  case "$raw" in
+    running)    sbox_stat="${OK} 运行中" ;;
+    exited)     sbox_stat="${NO} 已停止" ;;
+    created)    sbox_stat="${NO} 未启动" ;;
+    restarting) sbox_stat="${WAIT} 重启中" ;;
+    paused)     sbox_stat="${NO} 已暂停" ;;
+    none|*)     sbox_stat="${NO} 未部署" ;;
+  esac
+
+  echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
+}
+
 
   # BBR 状态
   cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
