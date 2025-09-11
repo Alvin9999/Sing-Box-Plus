@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.4.2"
+SCRIPT_VERSION="v1.4.4"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -33,7 +33,7 @@ SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 保留的协议（h2r 已去掉）
+# 已保留：无 h2r
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
@@ -77,7 +77,7 @@ install_docker(){
   if ! command -v docker >/dev/null 2>&1; then info "安装 Docker ..."; curl -fsSL https://get.docker.com | bash; else info "已安装 Docker"; fi
   systemctl enable --now docker >/dev/null 2>&1 || true
   if ! dcomp version >/dev/null 2>&1; then info "安装 Docker Compose 插件 ..."; apt-get update -y && apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true; fi
-  for dep in openssl jq; do command -v "$dep" >/dev/null 2>&1 || { apt-get update -y && apt-get install -y "$dep" >/dev/null 2>&1 || true; }; done
+  for dep in openssl jq curl; do command -v "$dep" >/dev/null 2>&1 || { apt-get update -y && apt-get install -y "$dep" >/dev/null 2>&1 || true; }; done
 }
 
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
@@ -236,7 +236,10 @@ PORT_VLESSR=""; PORT_VLESS_GRPCR=""; PORT_TROJANR=""; PORT_HY2=""; PORT_VMESS_WS
 PORT_HY2_OBFS=""; PORT_SS2022=""; PORT_SS=""; PORT_TUIC=""
 
 ensure_creds(){
+  # UUID
   [[ -z "${UUID:-}" ]] && UUID=$(gen_uuid)
+
+  # 基础凭据
   [[ -z "${HY2_PWD:-}" ]] && HY2_PWD=$(rand_b64_32)
   if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]]; then
     readarray -t RKP < <(gen_reality)
@@ -244,13 +247,17 @@ ensure_creds(){
     REALITY_PUB=$(printf "%s\n" "${RKP[@]}" | awk '/PublicKey/{print $2}')
     REALITY_SID=$(rand_hex8)
   fi
+
   # 新增凭据
   [[ -z "${HY2_PWD2:-}" ]]      && HY2_PWD2=$(rand_b64_32)
   [[ -z "${HY2_OBFS_PWD:-}" ]]  && HY2_OBFS_PWD=$(openssl rand -base64 16 | tr -d '\n')
   [[ -z "${SS2022_KEY:-}" ]]    && SS2022_KEY=$(rand_b64_32)
   [[ -z "${SS_PWD:-}" ]]        && SS_PWD=$(openssl rand -base64 24 | tr -d '=\n' | tr '+/' '-_')
-  [[ -z "${TUIC_UUID:-}" ]]     && TUIC_UUID=$(gen_uuid)
-  [[ -z "${TUIC_PWD:-}" ]]      && TUIC_PWD=$(openssl rand -base64 32 | tr -d '=\n' | tr '+/' '-_')
+
+  # TUIC：按你的要求，用户ID与密码都使用 UUID（每次确保一致）
+  TUIC_UUID="$UUID"
+  TUIC_PWD="$UUID"
+
   save_creds
 }
 
@@ -346,8 +353,7 @@ write_config(){
       "listen": "0.0.0.0",
       "listen_port": $PORT_SS2022,
       "method": "2022-blake3-aes-256-gcm",
-      "password": "$SS2022_KEY",
-      "network": "tcp,udp"
+      "password": "$SS2022_KEY"
     },
     {
       "type": "shadowsocks",
@@ -355,15 +361,14 @@ write_config(){
       "listen": "0.0.0.0",
       "listen_port": $PORT_SS,
       "method": "aes-256-gcm",
-      "password": "$SS_PWD",
-      "network": "tcp,udp"
+      "password": "$SS_PWD"
     },
     {
       "type": "tuic",
       "tag": "tuic-v5",
       "listen": "0.0.0.0",
       "listen_port": $PORT_TUIC,
-      "users": [ { "uuid": "$TUIC_UUID", "password": "$TUIC_PWD" } ],
+      "users": [ { "uuid": "$UUID", "password": "$UUID" } ],
       "congestion_control": "bbr",
       "tls": { "enabled": true, "certificate_path": "$CRT", "key_path": "$KEY", "alpn": ["h3"] }
     }
@@ -406,7 +411,8 @@ JSON
   links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS}?insecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=${HY2_OBFS_PWD}#hysteria2-obfs")
   links+=("ss://2022-blake3-aes-256-gcm:${SS2022_KEY}@${ip}:${PORT_SS2022}#ss2022")
   links+=("ss://aes-256-gcm:${SS_PWD}@${ip}:${PORT_SS}#ss")
-  links+=("tuic://${TUIC_UUID}:${TUIC_PWD}@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&sni=${REALITY_SERVER}&allow_insecure=1#tuic-v5")
+  # TUIC：insecure=1（多数客户端识别这个开关），密码与 UUID 一致；对密码做 URL 编码以防万一
+  links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（可直接导入 v2rayN）${C_RESET}"
   hr; for l in "${links[@]}"; do echo "  $l"; done; hr
@@ -499,23 +505,21 @@ print_manual_params(){
   { echo -e "Address (地址)\t$ip"
     echo -e "Port (端口)\t$PORT_SS2022"
     echo -e "Method (加密方式)\t2022-blake3-aes-256-gcm"
-    echo -e "Password (密钥，Base64)\t$SS2022_KEY"
-    echo -e "Network (传输)\ttcp,udp"; } | _tbl
+    echo -e "Password (密钥，Base64)\t$SS2022_KEY"; } | _tbl
   hr
 
   echo "📌 节点8（Shadowsocks aes-256-gcm / TCP+UDP）"
   { echo -e "Address (地址)\t$ip"
     echo -e "Port (端口)\t$PORT_SS"
     echo -e "Method (加密方式)\taes-256-gcm"
-    echo -e "Password (密码)\t$SS_PWD"
-    echo -e "Network (传输)\ttcp,udp"; } | _tbl
+    echo -e "Password (密码)\t$SS_PWD"; } | _tbl
   hr
 
   echo "📌 节点9（TUIC v5 / UDP）"
   { echo -e "Address (地址)\t$ip"
     echo -e "Port (端口)\t$PORT_TUIC"
-    echo -e "UUID (用户ID)\t$TUIC_UUID"
-    echo -e "Password (密码)\t$TUIC_PWD"
+    echo -e "UUID (用户ID)\t$UUID"
+    echo -e "Password (密码)\t$UUID"
     echo -e "Congestion (拥塞控制)\tbbr"
     echo -e "ALPN\th3"
     echo -e "SNI (serverName)\t$REALITY_SERVER"
@@ -562,7 +566,7 @@ status_bar(){
   qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
   if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
 
-  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
+  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/du/dev/null || echo "none"); else raw="none"; fi
   case "$raw" in running)sbox_stat="${OK} 运行中";; exited)sbox_stat="${NO} 已停止";; created)sbox_stat="${NO} 未启动";;
     restarting)sbox_stat="${WAIT} 重启中";; paused)sbox_stat="${NO} 已暂停";; none|*)sbox_stat="${NO} 未部署";; esac
 
