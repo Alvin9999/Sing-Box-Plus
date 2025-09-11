@@ -5,7 +5,7 @@
 # OS: Debian / Ubuntu
 # Version:
 SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.4.5"
+SCRIPT_VERSION="v1.4.6"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -13,6 +13,9 @@ set -euo pipefail
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
+# 防手误别名（即使写成 CRESET 也不报错）
+: "${CRESET:=$C_RESET}"
+
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 
@@ -22,9 +25,11 @@ fix_tty(){
   if [[ -t 0 && -t 1 ]]; then
     stty sane 2>/dev/null || true
     local kbs; kbs=$(tput kbs 2>/dev/null || echo '^?')
-    case "$kbs" in $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
-                    $'\b'|'^H')  stty erase '^H' 2>/dev/null || true ;;
-                    *)            stty erase '^?' 2>/dev/null || true ;; esac
+    case "$kbs" in
+      $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
+      $'\b'|'^H')  stty erase '^H' 2>/dev/null || true ;;
+      *)           stty erase '^?' 2>/dev/null || true ;;
+    esac
   fi
 }
 
@@ -33,14 +38,12 @@ SB_DIR=${SB_DIR:-/opt/sing-box}
 IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
 CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
 
-# 保留协议（不含 h2r）
+# 协议（按你的方案：无 h2r）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
 ENABLE_HYSTERIA2=${ENABLE_HYSTERIA2:-true}
 ENABLE_VMESS_WS=${ENABLE_VMESS_WS:-true}
-
-# 新增协议默认开启
 ENABLE_HY2_OBFS=${ENABLE_HY2_OBFS:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SS=${ENABLE_SS:-true}
@@ -390,7 +393,7 @@ print_links(){
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
 
-  # HY2 & HY2-Obfs：补全混淆密码；兼容 allowInsecure/insecure 两种写法
+  # HY2 & HY2-Obfs（补混淆密码，并兼容 allowInsecure/insecure 两种写法）
   links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#hysteria2")
   links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=$(urlenc "${HY2_OBFS_PWD}")&obfsParam=$(urlenc "${HY2_OBFS_PWD}")#hysteria2-obfs")
 
@@ -401,7 +404,7 @@ JSON
 )
   links+=("vmess://$(printf "%s" "$VMESS_JSON" | base64 -w 0 2>/dev/null || printf "%s" "$VMESS_JSON" | base64 | tr -d '\n')")
 
-  # TUIC：兼容 allowInsecure / insecure 两种写法；SNI + ALPN
+  # TUIC：兼容 allowInsecure / insecure；密码=UUID
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（可直接导入 v2rayN）${C_RESET}"
@@ -556,8 +559,14 @@ status_bar(){
   if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
 
   if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
-  case "$raw" in running)sbox_stat="${OK} 运行中";; exited)sbox_stat="${NO} 已停止";; created)sbox_stat="${NO} 未启动";;
-    restarting)sbox_stat="${WAIT} 重启中";; paused)sbox_stat="${NO} 已暂停";; none|*)sbox_stat="${NO} 未部署";; esac
+  case "$raw" in
+    running)   sbox_stat="${OK} 运行中";;
+    exited)    sbox_stat="${NO} 已停止";;
+    created)   sbox_stat="${NO} 未启动";;
+    restarting)sbox_stat="${WAIT} 重启中";;
+    paused)    sbox_stat="${NO} 已暂停";;
+    none|*)    sbox_stat="${NO} 未部署";;
+  esac
 
   echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
 }
@@ -621,10 +630,10 @@ menu(){
   echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
   echo -e "  ${C_GREEN}4)${C_RESET} 更新 Sing-Box Docker 镜像"
   echo -e "  ${C_GREEN}5)${C_RESET} 更新脚本"
-  echo -e "  ${C_GREEN}6)${CRESET} 一键更换所有端口（五位随机且互不重复）"
-  echo -e "  ${C_GREEN}7)${CRESET} 一键开启 BBR 加速"
-  echo -e "  ${C_GREEN}8)${CRESET} 卸载"
-  echo -e "  ${C_GREEN}0)${CRESET} 退出"
+  echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
+  echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速"
+  echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
+  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   status_bar
   read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
