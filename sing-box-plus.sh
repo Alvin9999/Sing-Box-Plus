@@ -118,7 +118,7 @@ install_docker(){
       tail -n 40 "$LOG_FILE" || true
       return 1
     fi
-    ok "Docker 安装成功"
+    info "Docker 安装成功"
   else
     info "已安装 Docker"
   fi
