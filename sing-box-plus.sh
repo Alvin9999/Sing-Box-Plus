@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # =======================================================
 # Sing-Box Native Manager (18 节点：直出 9 + WARP 9)
-#  - 去 Docker，原生 systemd 管理
-#  - jq 安全生成 config.json（杜绝 \n/控制字符导致解析失败）
-#  - safe_source_env 防护（跳过损坏的 *.env）
-#  - 修复 gen_uuid()（确保只返回单一 UUID）
-#  - 自动安装 wgcf，生成 WARP WireGuard 出站
-#  - 端口为 10000–65535 的 5 位随机数，18 个端口互不重复
+#  - 原生 systemd 管理，无 Docker 依赖
+#  - jq 安全生成 config.json
+#  - safe_source_env 保护 *.env
+#  - gen_uuid() 只返回单个 UUID（无换行）
+#  - 自动安装 wgcf 生成 WARP WireGuard 出站
+#  - 端口 10000–65535，18 个互不重复
 #  - 菜单：部署/查看链接/重启/一键换端口/启用BBR/卸载
+# Version: v2.0.0
 # =======================================================
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v1.5.0-native-warp"
+SCRIPT_VERSION="v2.0.0"
 
 # ================ 颜色 & UI ================
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
-CRESET="$C_RESET"   # ← 兼容别名，避免未定义
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 READ_OPTS=(-e -r)
@@ -59,6 +59,17 @@ safe_source_env(){ local f="$1"; [[ -f "$f" ]] || return 1; sed -i 's/\r$//' "$f
 urlenc(){ local s="$1" o= c; for((i=0;i<${#s};i++)){ c="${s:i:1}"; case "$c" in [a-zA-Z0-9.~_-])o+="$c";;*)printf -v h '%%%02X' "'$c"; o+="$h";; esac; }; printf '%s' "$o"; }
 get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
 is_uuid(){ [[ ${1:-} =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]]; }
+b64enc(){ if base64 --help 2>&1 | grep -q '\-w'; then base64 -w 0; else base64 | tr -d '\n'; fi; }
+
+# 未安装/未生成配置时的友好提示
+ensure_installed_or_hint(){
+  if [[ ! -x "$BIN_PATH" || ! -f "$CONF_JSON" ]]; then
+    echo -e "${C_YELLOW}[提示] 尚未安装或未生成配置。请先选择 ${C_GREEN}1）安装/部署${C_YELLOW}.${C_RESET}"
+    read -p "回车返回菜单..." _ || true
+    return 1
+  fi
+  return 0
+}
 
 # ================ 平台 / 包管理 ================
 OS_FAMILY=""; PKG=""
@@ -378,7 +389,7 @@ write_config(){
             local_address: [ $W4, $W6 ],
             private_key:$WPRIV, peer_public_key:$WPPUB,
             reserved: [ $WR1, $WR2, $WR3 ],
-            mtu:1280, persistent_keepalive:25
+            mtu:1280
           }
         ]
       else
@@ -416,6 +427,7 @@ open_firewall(){
     systemctl enable --now firewalld >/dev/null 2>&1 || true
     for r in "${rules[@]}"; do firewall-cmd --permanent --add-port="$r" >/dev/null 2>&1 || true; done; firewall-cmd --reload >/dev/null 2>&1 || true
   else
+    local p proto
     for r in "${rules[@]}"; do p="${r%/*}"; proto="${r#*/}";
       if [[ "$proto" == tcp ]]; then iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT; fi
       if [[ "$proto" == udp ]]; then iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT; fi
@@ -432,10 +444,13 @@ print_links(){
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
   links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#hysteria2")
-  links+=("vmess://$(printf "%s" "{\"v\":\"2\",\"ps\":\"vmess-ws\",\"add\":\"${ip}\",\"port\":\"${PORT_VMESS_WS}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"${VMESS_WS_PATH}\",\"tls\":\"\"}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")")
+  VMESS_JSON=$(cat <<JSON
+{"v":"2","ps":"vmess-ws","add":"${ip}","port":"${PORT_VMESS_WS}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
+JSON
+); links+=("vmess://$(printf "%s" "$VMESS_JSON" | b64enc)")
   links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=$(urlenc "${HY2_OBFS_PWD}")#hysteria2-obfs")
-  links+=("ss://$(printf "%s" "2022-blake3-aes-256-gcm:${SS2022_KEY}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")@${ip}:${PORT_SS2022}#ss2022")
-  links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")@${ip}:${PORT_SS}#ss")
+  links+=("ss://$(printf "%s" "2022-blake3-aes-256-gcm:${SS2022_KEY}" | b64enc)@${ip}:${PORT_SS2022}#ss2022")
+  links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS}#ss")
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
   # WARP 9
@@ -443,10 +458,13 @@ print_links(){
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR_W}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality-warp")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR_W}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality-warp")
   links+=("hy2://$(urlenc "${HY2_PWD}")@${ip}:${PORT_HY2_W}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#hysteria2-warp")
-  links+=("vmess://$(printf "%s" "{\"v\":\"2\",\"ps\":\"vmess-ws-warp\",\"add\":\"${ip}\",\"port\":\"${PORT_VMESS_WS_W}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"${VMESS_WS_PATH}\",\"tls\":\"\"}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")")
+  VMESS_JSON_W=$(cat <<JSON
+{"v":"2","ps":"vmess-ws-warp","add":"${ip}","port":"${PORT_VMESS_WS_W}","id":"${UUID}","aid":"0","net":"ws","type":"none","host":"","path":"${VMESS_WS_PATH}","tls":""}
+JSON
+); links+=("vmess://$(printf "%s" "$VMESS_JSON_W" | b64enc)")
   links+=("hy2://$(urlenc "${HY2_PWD2}")@${ip}:${PORT_HY2_OBFS_W}?insecure=1&allowInsecure=1&sni=${REALITY_SERVER}&alpn=h3&obfs=salamander&obfs-password=$(urlenc "${HY2_OBFS_PWD}")#hysteria2-obfs-warp")
-  links+=("ss://$(printf "%s" "2022-blake3-aes-256-gcm:${SS2022_KEY}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")@${ip}:${PORT_SS2022_W}#ss2022-warp")
-  links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | base64 -w 0 2>/dev/null || base64 | tr -d "\n")@${ip}:${PORT_SS_W}#ss-warp")
+  links+=("ss://$(printf "%s" "2022-blake3-aes-256-gcm:${SS2022_KEY}" | b64enc)@${ip}:${PORT_SS2022_W}#ss2022-warp")
+  links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS_W}#ss-warp")
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC_W}?congestion_control=bbr&alpn=h3&insecure=1&sni=${REALITY_SERVER}#tuic-v5-warp")
 
   echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"; hr; for l in "${links[@]}"; do echo "  $l"; done; hr
@@ -497,19 +515,19 @@ deploy_native(){
 menu(){
   banner
   echo -e "  ${C_GREEN}1)${C_RESET} 安装/部署（18 节点）"
-  echo -e "  ${C_GREEN}2)${CRESET} 查看分享链接"
-  echo -e "  ${C_GREEN}3)${CRESET} 重启服务"
-  echo -e "  ${C_GREEN}4)${CRESET} 一键更换所有端口"
-  echo -e "  ${C_GREEN}5)${CRESET} 一键开启 BBR"
-  echo -e "  ${C_GREEN}8)${CRESET} 卸载"
-  echo -e "  ${C_GREEN}0)${CRESET} 退出"
+  echo -e "  ${C_GREEN}2)${C_RESET} 查看分享链接"
+  echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
+  echo -e "  ${C_GREEN}4)${C_RESET} 一键更换所有端口"
+  echo -e "  ${C_GREEN}5)${C_RESET} 一键开启 BBR"
+  echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
+  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
   hr
   read "${READ_OPTS[@]}" -p "选择: " op || true
   case "${op:-}" in
     1) deploy_native;;
-    2) print_links; read -p "回车返回..." _ || true;;
-    3) restart_service;;
-    4) rotate_ports;;
+    2) ensure_installed_or_hint && { print_links; read -p "回车返回..." _ || true; };;
+    3) ensure_installed_or_hint && restart_service;;
+    4) ensure_installed_or_hint && rotate_ports;;
     5) enable_bbr;;
     8) uninstall_all;;
     0) exit 0;;
@@ -523,3 +541,4 @@ save_env
 load_creds || true; ensure_creds
 load_ports || true; save_all_ports
 while true; do menu; done
+
