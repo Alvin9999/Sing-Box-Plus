@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # =======================================================
 # Sing-Box Native Manager (18 节点：直出 9 + WARP 9)
-#  - 原生 systemd 管理，无 Docker 依赖
+#  - 原生 systemd 管理，无 Docker
 #  - jq 安全生成 config.json
-#  - safe_source_env 保护 *.env
-#  - gen_uuid() 只返回单个 UUID（无换行）
-#  - 自动安装 wgcf 生成 WARP WireGuard 出站
+#  - safe_source_env 防坏 env
+#  - gen_uuid() 仅 1 个 UUID，无换行
+#  - 自动 wgcf 生成 WARP 出站
 #  - 端口 10000–65535，18 个互不重复
-#  - 菜单：部署/查看链接/重启/一键换端口/启用BBR/卸载
+#  - 菜单：部署/链接/重启/换端口/BBR/卸载
 # Version: v2.0.0
 # =======================================================
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.0.0"
+SCRIPT_VERSION="v2.0.1"
+
+# 为 1.12.x 兼容旧 WireGuard 出站（1.13 将移除）
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
 
 # ================ 颜色 & UI ================
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
@@ -310,7 +313,8 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=${BIN_PATH} -D ${DATA_DIR} -C ${SB_DIR} run
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+ExecStart=${BIN_PATH} run -c ${CONF_JSON} -D ${DATA_DIR}
 Restart=on-failure
 RestartSec=3
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -356,6 +360,15 @@ write_config(){
   def inbound_ss(port): {type:"shadowsocks", listen:"0.0.0.0", listen_port:port, method:"aes-256-gcm", password:$SSPWD};
   def inbound_tuic(port): {type:"tuic", listen:"0.0.0.0", listen_port:port, users:[{uuid:$TUICUUID, password:$TUICPWD}], congestion_control:"bbr", tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
 
+  def warp_outbound():
+    {type:"wireguard", tag:"warp",
+      server:$WHOST, server_port:$WPORT,
+      local_address: ( [ $W4, $W6 ] | map(select(. != "")) ),
+      private_key:$WPRIV, peer_public_key:$WPPUB,
+      reserved: [ $WR1, $WR2, $WR3 ],
+      mtu:1280
+    };
+
   {
     log:{level:"info", timestamp:true},
     inbounds:[
@@ -380,24 +393,14 @@ write_config(){
       (inbound_tuic($PW9) + {tag:"tuic-v5-warp"})
     ],
     outbounds: (
-      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 then
-        [
-          {type:"direct", tag:"direct"},
-          {type:"block", tag:"block"},
-          {type:"wireguard", tag:"warp",
-            server:$WHOST, server_port:$WPORT,
-            local_address: [ $W4, $W6 ],
-            private_key:$WPRIV, peer_public_key:$WPPUB,
-            reserved: [ $WR1, $WR2, $WR3 ],
-            mtu:1280
-          }
-        ]
+      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 and ($WHOST|length)>0 then
+        [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}, warp_outbound()]
       else
         [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}]
       end
     ),
     route: (
-      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 then
+      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 and ($WHOST|length)>0 then
         { rules:[
             { inbound: ["vless-reality-warp","vless-grpcr-warp","trojan-reality-warp","hy2-warp","vmess-ws-warp","hy2-obfs-warp","ss2022-warp","ss-warp","tuic-v5-warp"], outbound:"warp" }
           ],
@@ -479,7 +482,7 @@ rotate_ports(){
   PORT_HY2_OBFS=$(gen_port); PORT_SS2022=$(gen_port); PORT_SS=$(gen_port); PORT_TUIC=$(gen_port)
   PORT_VLESSR_W=$(gen_port); PORT_VLESS_GRPCR_W=$(gen_port); PORT_TROJANR_W=$(gen_port); PORT_HY2_W=$(gen_port); PORT_VMESS_WS_W=$(gen_port)
   PORT_HY2_OBFS_W=$(gen_port); PORT_SS2022_W=$(gen_port); PORT_SS_W=$(gen_port); PORT_TUIC_W=$(gen_port)
-  save_ports; write_config; "$BIN_PATH" check -c "$CONF_JSON"; systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true; open_firewall
+  save_ports; write_config; ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"; systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true; open_firewall
   echo -e "${C_GREEN}端口已全部更换${C_RESET}"
 }
 enable_bbr(){
@@ -505,7 +508,7 @@ uninstall_all(){
 deploy_native(){
   install_singbox
   write_config
-  info "检查配置 ..."; "$BIN_PATH" check -c "$CONF_JSON"
+  info "检查配置 ..."; ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"
   info "写入并启用 systemd 服务 ..."; write_systemd; systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
   open_firewall
   echo; echo -e "${C_BOLD}${C_GREEN}★ 部署完成（18 节点）${C_RESET}"; echo
@@ -541,4 +544,3 @@ save_env
 load_creds || true; ensure_creds
 load_ports || true; save_all_ports
 while true; do menu; done
-
