@@ -7,18 +7,17 @@
 #  - gen_uuid() 仅 1 个 UUID，无换行
 #  - 自动 wgcf 生成 WARP 出站
 #  - 端口 10000–65535，18 个互不重复
-#  - 菜单：部署/链接/重启/换端口/BBR/卸载
-# Version: v2.0.1
+# Version: v2.0.2
 # =======================================================
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.0.1"
+SCRIPT_VERSION="v2.0.2"
 
-# 为 1.12.x 兼容旧 WireGuard 出站（1.13 将移除）
+# 兼容 sing-box 1.12.x 的 legacy wireguard outbound（1.13 将移除）
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
 
-# ================ 颜色 & UI ================
+# ===== UI =====
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
@@ -26,11 +25,11 @@ hr(){ printf "${C_DIM}───────────────────�
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 READ_OPTS=(-e -r)
 
-# ================ 路径 & 开关 ================
+# ===== 路径 & 开关 =====
 SB_DIR=${SB_DIR:-/opt/sing-box}; DATA_DIR="$SB_DIR/data"; CERT_DIR="$SB_DIR/cert"; CONF_JSON="$SB_DIR/config.json"
 BIN_PATH=${BIN_PATH:-/usr/local/bin/sing-box}; SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
 
-# 直出 9 个
+# 直出 9
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
@@ -40,8 +39,7 @@ ENABLE_HY2_OBFS=${ENABLE_HY2_OBFS:-true}
 ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SS=${ENABLE_SS:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
-
-# 再复制 9 个走 WARP
+# WARP 套壳 9
 ENABLE_WARP=${ENABLE_WARP:-true}
 
 # 细节
@@ -50,7 +48,7 @@ REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
 VMESS_WS_PATH=${VMESS_WS_PATH:-/vm}
 
-# ================ 工具函数 ================
+# ===== 工具函数 =====
 info(){ echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
 warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
 err(){  echo -e "${C_RED}[错误]${C_RESET} $*"; }
@@ -64,17 +62,12 @@ get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YO
 is_uuid(){ [[ ${1:-} =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]]; }
 b64enc(){ if base64 --help 2>&1 | grep -q '\-w'; then base64 -w 0; else base64 | tr -d '\n'; fi; }
 
-# 未安装/未生成配置时的友好提示
 ensure_installed_or_hint(){
   if [[ ! -x "$BIN_PATH" || ! -f "$CONF_JSON" ]]; then
     echo -e "${C_YELLOW}[提示] 尚未安装或未生成配置。请先选择 ${C_GREEN}1）安装/部署${C_YELLOW}.${C_RESET}"
-    read -p "回车返回菜单..." _ || true
-    return 1
-  fi
-  return 0
-}
+    read -p "回车返回菜单..." _ || true; return 1; fi; return 0; }
 
-# ================ 平台 / 包管理 ================
+# ===== 包管理 =====
 OS_FAMILY=""; PKG=""
 pkg_detect(){ . /etc/os-release
   case "${ID,,}" in
@@ -94,7 +87,7 @@ pkg_install(){ local pkgs=("$@"); case "$PKG" in
   yum) yum install -y "${pkgs[@]}" >/dev/null 2>&1 || true;;
 esac; }
 
-# ================ 安装 sing-box ================
+# ===== 安装 sing-box =====
 arch_map(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; armv7l|armv7) echo armv7;; i386|i686) echo 386;; s390x) echo s390x;; *) err "不支持架构 $(uname -m)"; exit 1;; esac; }
 install_prereqs(){ pkg_update
   if [[ "$OS_FAMILY" == "debian" ]]; then pkg_install jq curl openssl iproute2 ca-certificates tar xz-utils coreutils
@@ -120,7 +113,7 @@ install_singbox(){ install_prereqs
   info "已安装：$("$BIN_PATH" version 2>/dev/null || echo sing-box)"; rm -rf "$tmp"
 }
 
-# ================ 端口（18 个互不重复） ================
+# ===== 端口（18 个互不重复） =====
 PORTS=(); gen_port(){ while :; do p=$(( ( RANDOM % 55536 ) + 10000 )); [[ $p -le 65535 ]] || continue; [[ ! " ${PORTS[*]} " =~ " $p " ]] && { PORTS+=("$p"); echo "$p"; return; }; done; }; rand_ports_reset(){ PORTS=(); }
 
 # 直出 9
@@ -181,7 +174,7 @@ save_all_ports(){
   save_ports
 }
 
-# ================ env / creds / warp ================
+# ===== env / creds / warp =====
 save_env(){ cat > "$SB_DIR/env.conf" <<EOF
 BIN_PATH=$BIN_PATH
 ENABLE_VLESS_REALITY=$ENABLE_VLESS_REALITY
@@ -233,16 +226,14 @@ EOF
 }
 load_warp(){ safe_source_env "$SB_DIR/warp.env" || return 1; }
 
-# ================ 凭据 & 证书生成 ================
+# ===== 凭据 & 证书 =====
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
 rand_b64_32(){ openssl rand -base64 32 | tr -d "\n"; }
-gen_uuid(){
-  local u=""
+gen_uuid(){ local u=""
   if [[ -x "$BIN_PATH" ]]; then u=$("$BIN_PATH" generate uuid 2>/dev/null | head -n1); fi
   if [[ -z "$u" ]] && command -v uuidgen >/dev/null 2>&1; then u=$(uuidgen | head -n1); fi
   if [[ -z "$u" ]]; then u=$(cat /proc/sys/kernel/random/uuid | head -n1); fi
-  printf "%s" "$u" | tr -d "\r\n"
-}
+  printf "%s" "$u" | tr -d "\r\n"; }
 gen_reality(){ "$BIN_PATH" generate reality-keypair; }
 mk_cert(){ local crt="$CERT_DIR/fullchain.pem" key="$CERT_DIR/key.pem"
   if [[ ! -s "$crt" || ! -s "$key" ]]; then
@@ -253,7 +244,7 @@ mk_cert(){ local crt="$CERT_DIR/fullchain.pem" key="$CERT_DIR/key.pem"
 }
 ensure_creds(){
   [[ -z "${UUID:-}" ]] && UUID=$(gen_uuid)
-  if ! is_uuid "$UUID"; then UUID=$(gen_uuid); fi
+  is_uuid "$UUID" || UUID=$(gen_uuid)
   [[ -z "${HY2_PWD:-}" ]] && HY2_PWD=$(rand_b64_32)
   if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" || -z "${REALITY_SID:-}" ]]; then
     readarray -t RKP < <(gen_reality)
@@ -269,17 +260,13 @@ ensure_creds(){
   save_creds
 }
 
-# ================ WARP（wgcf） ================
+# ===== WARP（wgcf） =====
 WGCF_BIN=/usr/local/bin/wgcf
 install_wgcf(){
   [[ -x "$WGCF_BIN" ]] && return 0
   local GOA url tmp
   case "$(arch_map)" in
-    amd64) GOA=amd64;;
-    arm64) GOA=arm64;;
-    armv7) GOA=armv7;;
-    386)   GOA=386;;
-    *)     GOA=amd64;;
+    amd64) GOA=amd64;; arm64) GOA=arm64;; armv7) GOA=armv7;; 386) GOA=386;; *) GOA=amd64;;
   esac
   url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
         | jq -r ".assets[] | select(.name|test(\"linux_${GOA}$\")) | .browser_download_url" | head -n1)
@@ -294,19 +281,22 @@ ensure_warp_profile(){
   if [[ ! -f "$wd/wgcf-account.toml" ]]; then "$WGCF_BIN" register --accept-tos --config "$wd/wgcf-account.toml" >/dev/null; fi
   "$WGCF_BIN" generate --config "$wd/wgcf-account.toml" --profile "$wd/wgcf-profile.conf" >/dev/null
   local prof="$wd/wgcf-profile.conf"
-  WARP_PRIVATE_KEY=$(awk -F'= ' '/PrivateKey/{print $2}' "$prof")
-  WARP_PEER_PUBLIC_KEY=$(awk -F'= ' '/PublicKey/{print $2}' "$prof")
-  local ep; ep=$(awk -F'= ' '/Endpoint/{print $2}' "$prof")
-  WARP_ENDPOINT_HOST=${ep*%:*}; WARP_ENDPOINT_HOST=${WARP_ENDPOINT_HOST:-${ep%:*}}
+  WARP_PRIVATE_KEY=$(awk -F'= ' '/PrivateKey/{print $2}' "$prof" | tr -d '" ')
+  WARP_PEER_PUBLIC_KEY=$(awk -F'= ' '/PublicKey/{print $2}' "$prof" | tr -d '" ')
+  local ep; ep=$(awk -F'= ' '/Endpoint/{print $2}' "$prof" | tr -d '" ')
+  WARP_ENDPOINT_HOST=${ep%:*}
   WARP_ENDPOINT_PORT=${ep##*:}
-  local ad; ad=$(awk -F'= ' '/Address/{print $2}' "$prof" | tr -d " ")
+  [[ -z "$WARP_ENDPOINT_PORT" || ! "$WARP_ENDPOINT_PORT" =~ ^[0-9]+$ ]] && WARP_ENDPOINT_PORT=2408
+  local ad; ad=$(awk -F'= ' '/Address/{print $2}' "$prof" | tr -d '" ')
   WARP_ADDRESS_V4=${ad%%,*}; WARP_ADDRESS_V6=${ad##*,}
-  local rs; rs=$(awk -F'= ' '/Reserved/{print $2}' "$prof" | tr -d " ")
-  WARP_RESERVED_1=${rs%%,*}; rs=${rs#*,}; WARP_RESERVED_2=${rs%%,*}; WARP_RESERVED_3=${rs##*,}
+  [[ "$WARP_ADDRESS_V4" == "$WARP_ADDRESS_V6" ]] && WARP_ADDRESS_V6=""
+  local rs; rs=$(awk -F'= ' '/Reserved/{print $2}' "$prof" | tr -d '" ')
+  IFS=',' read -r r1 r2 r3 <<< "$rs"
+  WARP_RESERVED_1=${r1//[[:space:]]/}; WARP_RESERVED_2=${r2//[[:space:]]/}; WARP_RESERVED_3=${r3//[[:space:]]/}
   save_warp
 }
 
-# ================ systemd ================
+# ===== systemd =====
 write_systemd(){ cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
 [Unit]
 Description=Sing-Box (Native 18 nodes)
@@ -326,7 +316,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload; systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true; }
 
-# ================ 写 config.json（18 入站 + WARP 出站 + 路由） ================
+# ===== 写 config.json（18 入站 + WARP 出站 + 路由） =====
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
   ensure_creds; save_all_ports; mk_cert
@@ -415,7 +405,7 @@ write_config(){
   save_env
 }
 
-# ================ 防火墙 ================
+# ===== 防火墙 =====
 open_firewall(){
   local rules=()
   rules+=("${PORT_VLESSR}/tcp" "${PORT_VLESS_GRPCR}/tcp" "${PORT_TROJANR}/tcp" "${PORT_VMESS_WS}/tcp")
@@ -440,10 +430,9 @@ open_firewall(){
   fi
 }
 
-# ================ 分享链接（18 条） ================
+# ===== 链接输出 =====
 print_links(){
   load_env; load_creds; load_ports; local ip; ip=$(get_ip); local links=()
-  # 直出 9
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
@@ -457,7 +446,6 @@ JSON
   links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS}#ss")
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3&insecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
-  # WARP 9
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR_W}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality-warp")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR_W}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality-warp")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR_W}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality-warp")
@@ -474,7 +462,7 @@ JSON
   echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"; hr; for l in "${links[@]}"; do echo "  $l"; done; hr
 }
 
-# ================ 运维功能 ================
+# ===== 运维 =====
 restart_service(){ systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true; echo -e "${C_GREEN}已重启${C_RESET}"; }
 rotate_ports(){
   load_env; load_creds || { err "未找到凭据"; return 1; }
@@ -502,10 +490,10 @@ uninstall_all(){
   systemctl stop "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/${SYSTEMD_SERVICE}"; systemctl daemon-reload || true
   rm -rf "$SB_DIR" "$BIN_PATH"
-  echo -e "${C_GREEN}已卸载${C_RESET}"
+  echo -e "${C_GREEN}已卸载${CRESET}"
 }
 
-# ================ 部署流程 & 菜单 ================
+# ===== 部署 & 菜单 =====
 deploy_native(){
   install_singbox
   write_config
@@ -522,26 +510,4 @@ menu(){
   echo -e "  ${C_GREEN}2)${C_RESET} 查看分享链接"
   echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
   echo -e "  ${C_GREEN}4)${C_RESET} 一键更换所有端口"
-  echo -e "  ${C_GREEN}5)${C_RESET} 一键开启 BBR"
-  echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
-  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
-  hr
-  read "${READ_OPTS[@]}" -p "选择: " op || true
-  case "${op:-}" in
-    1) deploy_native;;
-    2) ensure_installed_or_hint && { print_links; read -p "回车返回..." _ || true; };;
-    3) ensure_installed_or_hint && restart_service;;
-    4) ensure_installed_or_hint && rotate_ports;;
-    5) enable_bbr;;
-    8) uninstall_all;;
-    0) exit 0;;
-    *) :;;
-  esac
-}
-
-# ================ 入口 ================
-need_root; pkg_detect; ensure_dirs
-save_env
-load_creds || true; ensure_creds
-load_ports || true; save_all_ports
-while true; do menu; done
+  echo -e "  ${C
