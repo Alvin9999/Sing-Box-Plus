@@ -329,8 +329,17 @@ EOF
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
 rand_b64_32(){ openssl rand -base64 32 | tr -d '\n'; }
 gen_uuid(){
-  if [[ -x "$BIN_PATH" ]]; then "$BIN_PATH" generate uuid 2>/dev/null || true; fi
-  command -v uuidgen >/dev/null 2>&1 && uuidgen || cat /proc/sys/kernel/random/uuid
+  local u=""
+  if [[ -x "$BIN_PATH" ]]; then
+    u=$("$BIN_PATH" generate uuid 2>/dev/null | head -n1)
+  fi
+  if [[ -z "$u" ]] && command -v uuidgen >/dev/null 2>&1; then
+    u=$(uuidgen | head -n1)
+  fi
+  if [[ -z "$u" ]]; then
+    u=$(cat /proc/sys/kernel/random/uuid | head -n1)
+  fi
+  printf '%s' "$u" | tr -d '\r\n'
 }
 gen_reality(){
   require_cmd "$BIN_PATH"
