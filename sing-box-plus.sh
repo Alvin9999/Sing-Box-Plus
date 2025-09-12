@@ -17,6 +17,8 @@ C_BLUE="\033[34m"; C_CYAN="\033[36m"
 
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
+# 统一日志文件（可改路径）
+LOG_FILE=${LOG_FILE:-/var/log/sing-box-plus.log}
 
 ########################  输入修复（退格可用）  ########################
 READ_OPTS=(-e -r)
@@ -98,47 +100,64 @@ get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YO
 
 install_docker(){
   if ! command -v docker >/dev/null 2>&1; then
-    info "安装 Docker ..."
-    curl -fsSL https://get.docker.com | sh
+    info "正在安装 Docker（这一步可能 30–90 秒），详细日志：$LOG_FILE"
+    # 开始安装：把详细输出写入日志，前台显示点点点
+    : >"$LOG_FILE" 2>/dev/null || true
+    ( curl -fsSL https://get.docker.com | sh -s -- ) >>"$LOG_FILE" 2>&1 & pid=$!
+
+    printf "   "   # 小间距更好看
+    while kill -0 "$pid" 2>/dev/null; do
+      printf "."; sleep 1
+    done
+    wait "$pid"; rc=$?
+    echo
+
+    if [[ $rc -ne 0 ]]; then
+      err "Docker 安装失败"
+      echo -e "${C_YELLOW}—— 最近 40 行日志 ——${C_RESET}"
+      tail -n 40 "$LOG_FILE" || true
+      return 1
+    fi
+    ok "Docker 安装成功"
   else
     info "已安装 Docker"
   fi
+
+  # 启动并开机自启（忽略报错）
   systemctl enable --now docker >/dev/null 2>&1 || true
 
-  # Compose 插件
+  # Docker Compose 插件（尽量用官方插件）
   if ! docker compose version >/dev/null 2>&1; then
-    info "安装 Docker Compose ..."
+    info "安装 Docker Compose 插件 ..."
     pkg_update
     case "$PKG" in
-      apt) pkg_install docker-compose-plugin || true;;
-      dnf) pkg_install docker-compose-plugin || true;;
-      yum) pkg_install docker-compose-plugin || true;;
+      apt|dnf|yum) pkg_install docker-compose-plugin || true;;
     esac
   fi
+
   # 兜底：pip 安装 docker-compose (v1)
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    info "安装 docker-compose（pip 兜底）..."
     pkg_update
     case "$PKG" in
-      apt) pkg_install python3-pip;;
-      dnf) pkg_install python3-pip;;
-      yum) pkg_install epel-release && pkg_install python3-pip;;
+      apt|dnf) pkg_install python3-pip;;
+      yum)     pkg_install epel-release && pkg_install python3-pip;;
     esac
-    pip3 install --no-cache-dir docker-compose >/dev/null 2>&1 || true
+    pip3 install --no-cache-dir docker-compose >>"$LOG_FILE" 2>&1 || true
     ln -sf "$(command -v docker-compose)" /usr/local/bin/docker-compose 2>/dev/null || true
   fi
 
-  # 依赖
+  # 常用依赖
   pkg_update
   if [[ "$OS_FAMILY" == "debian" ]]; then
     pkg_install jq curl openssl iproute2 ca-certificates
-    # 防火墙工具：UFW 常见
     command -v ufw >/dev/null 2>&1 || pkg_install ufw
   else
     pkg_install jq curl openssl iproute ca-certificates
-    # Firewalld 常见
     command -v firewall-cmd >/dev/null 2>&1 || pkg_install firewalld
   fi
 }
+
 
 ########################  SELinux 适配（尽量放宽容器网络限制）  ########################
 selinux_tune(){
