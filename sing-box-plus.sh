@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # -------------------------------------------------------
-# Sing-Box Docker Manager (Reality + HY2 + VMess WS + SS + SS2022 + TUIC)
-# Author: Alvin9999
+# Sing-Box Native Manager (Reality + HY2 + VMess WS + SS + SS2022 + TUIC)
+# Author: (ported from Docker version by Alvin9999; native rewrite)
 # OS: Debian / Ubuntu / CentOS / RHEL / Rocky / Alma
 # Version:
-SCRIPT_NAME="Sing-Box Docker Manager"
-SCRIPT_VERSION="v1.5.0"
+SCRIPT_NAME="Sing-Box Native Manager"
+SCRIPT_VERSION="v1.5.0-native"
 # -------------------------------------------------------
 set -euo pipefail
 
@@ -13,12 +13,10 @@ set -euo pipefail
 C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
-: "${CRESET:=$C_RESET}"   # 兜底别名，防手误
+: "${CRESET:=$C_RESET}"
 
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
-# 统一日志文件（可改路径）
-LOG_FILE=${LOG_FILE:-/var/log/sing-box-plus.log}
 
 ########################  输入修复（退格可用）  ########################
 READ_OPTS=(-e -r)
@@ -28,18 +26,23 @@ fix_tty(){
     local kbs; kbs=$(tput kbs 2>/dev/null || echo '^?')
     case "$kbs" in
       $'\177'|'^?') stty erase '^?' 2>/dev/null || true ;;
-      $'\b'|'^H')  stty erase '^H' 2>/dev/null || true ;;
-      *)           stty erase '^?' 2>/dev/null || true ;;
+      $'\b'|'^H')   stty erase '^H' 2>/dev/null || true ;;
+      *)            stty erase '^?' 2>/dev/null || true ;;
     esac
   fi
 }
 
 ########################  选项与默认  ########################
-SB_DIR=${SB_DIR:-/opt/sing-box}
-IMAGE=${IMAGE:-ghcr.io/sagernet/sing-box:latest}
-CONTAINER_NAME=${CONTAINER_NAME:-sing-box}
+SB_DIR=${SB_DIR:-/opt/sing-box}          # 配置/证书/数据目录（与原脚本一致，迁移平滑）
+DATA_DIR="${SB_DIR}/data"
+CERT_DIR="${SB_DIR}/cert"
+TOOLS_DIR="${SB_DIR}/tools"
+CONF_JSON="${SB_DIR}/config.json"
 
-# 协议（按你的方案：无 H2R）
+BIN_PATH=${BIN_PATH:-/usr/local/bin/sing-box}
+SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
+
+# 协议（与原脚本保持一致：无 H2R）
 ENABLE_VLESS_REALITY=${ENABLE_VLESS_REALITY:-true}
 ENABLE_VLESS_GRPCR=${ENABLE_VLESS_GRPCR:-true}
 ENABLE_TROJAN_REALITY=${ENABLE_TROJAN_REALITY:-true}
@@ -57,8 +60,7 @@ GRPC_SERVICE=${GRPC_SERVICE:-grpc}
 VMESS_WS_PATH=${VMESS_WS_PATH:-/vm}
 
 PLUS_RAW_URL="https://raw.githubusercontent.com/Alvin9999/Sing-Box-Plus/main/sing-box-plus.sh"
-PLUS_LOCAL="${SB_DIR}/tools/sing-box-plus.sh"
-SYSTEMD_SERVICE="sing-box-docker.service"
+PLUS_LOCAL="${TOOLS_DIR}/sing-box-plus.sh"
 
 ########################  工具函数  ########################
 info(){ echo -e "${C_GREEN}[信息]${C_RESET} $*"; }
@@ -85,7 +87,7 @@ pkg_update(){
     yum) yum makecache -y >/dev/null 2>&1 || true;;
   esac
 }
-pkg_install(){ # 多个包名用空格分隔，按发行版选择可替代名
+pkg_install(){
   local pkgs=("$@")
   case "$PKG" in
     apt) apt-get install -y "${pkgs[@]}" >/dev/null 2>&1 || true;;
@@ -94,89 +96,70 @@ pkg_install(){ # 多个包名用空格分隔，按发行版选择可替代名
   esac
 }
 
-ensure_dirs(){ mkdir -p "$SB_DIR" "$SB_DIR/data" "$SB_DIR/tools" "$SB_DIR/cert"; chmod 700 "$SB_DIR"; }
-dcomp(){ if docker compose version >/dev/null 2>&1; then docker compose "$@"; else docker-compose "$@"; fi; }
+ensure_dirs(){ mkdir -p "$SB_DIR" "$DATA_DIR" "$TOOLS_DIR" "$CERT_DIR"; chmod 700 "$SB_DIR"; }
+
 get_ip(){ curl -fsS4 https://ip.gs || curl -fsS4 https://ifconfig.me || echo "YOUR_SERVER_IP"; }
 
-install_docker(){
-  if ! command -v docker >/dev/null 2>&1; then
-    info "正在安装 Docker（这一步可能 30–90 秒），详细日志：$LOG_FILE"
-    # 开始安装：把详细输出写入日志，前台显示点点点
-    : >"$LOG_FILE" 2>/dev/null || true
-    ( curl -fsSL https://get.docker.com | sh -s -- ) >>"$LOG_FILE" 2>&1 & pid=$!
-
-    printf "   "   # 小间距更好看
-    while kill -0 "$pid" 2>/dev/null; do
-      printf "."; sleep 1
-    done
-    wait "$pid"; rc=$?
-    echo
-
-    if [[ $rc -ne 0 ]]; then
-      err "Docker 安装失败"
-      echo -e "${C_YELLOW}—— 最近 40 行日志 ——${C_RESET}"
-      tail -n 40 "$LOG_FILE" || true
-      return 1
-    fi
-    info "Docker 安装成功"
-  else
-    info "已安装 Docker"
-  fi
-
-  # 启动并开机自启（忽略报错）
-  systemctl enable --now docker >/dev/null 2>&1 || true
-
-  # Docker Compose 插件（尽量用官方插件）
-  if ! docker compose version >/dev/null 2>&1; then
-    info "安装 Docker Compose 插件 ..."
-    pkg_update
-    case "$PKG" in
-      apt|dnf|yum) pkg_install docker-compose-plugin || true;;
-    esac
-  fi
-
-  # 兜底：pip 安装 docker-compose (v1)
-  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-    info "安装 docker-compose（pip 兜底）..."
-    pkg_update
-    case "$PKG" in
-      apt|dnf) pkg_install python3-pip;;
-      yum)     pkg_install epel-release && pkg_install python3-pip;;
-    esac
-    pip3 install --no-cache-dir docker-compose >>"$LOG_FILE" 2>&1 || true
-    ln -sf "$(command -v docker-compose)" /usr/local/bin/docker-compose 2>/dev/null || true
-  fi
-
-  # 常用依赖
+########################  安装 sing-box 二进制  ########################
+arch_map(){
+  local m; m=$(uname -m)
+  case "$m" in
+    x86_64|amd64) echo "amd64";;
+    aarch64|arm64) echo "arm64";;
+    armv7l|armv7) echo "armv7";;
+    i386|i686) echo "386";;
+    s390x) echo "s390x";;
+    *) err "不支持的架构: $m"; exit 1;;
+  esac
+}
+install_prereqs(){
   pkg_update
   if [[ "$OS_FAMILY" == "debian" ]]; then
-    pkg_install jq curl openssl iproute2 ca-certificates
+    pkg_install jq curl openssl iproute2 ca-certificates tar xz-utils
     command -v ufw >/dev/null 2>&1 || pkg_install ufw
   else
-    pkg_install jq curl openssl iproute ca-certificates
+    pkg_install jq curl openssl iproute ca-certificates tar xz
     command -v firewall-cmd >/dev/null 2>&1 || pkg_install firewalld
   fi
 }
-
-
-########################  SELinux 适配（尽量放宽容器网络限制）  ########################
-selinux_tune(){
-  if command -v getenforce >/dev/null 2>&1; then
-    local mode; mode=$(getenforce 2>/dev/null || echo Disabled)
-    if [[ "$mode" == "Enforcing" ]]; then
-      info "检测到 SELinux: Enforcing，尝试放宽容器限制..."
-      # 尝试安装 semanage
-      pkg_update
-      if [[ "$OS_FAMILY" == "debian" ]]; then
-        pkg_install policycoreutils-python-utils || true
-      else
-        pkg_install policycoreutils-python-utils policycoreutils-python || true
-      fi
-      # 常用布尔值
-      setsebool -P container_manage_cgroup 1 >/dev/null 2>&1 || true
-      setsebool -P container_connect_any 1 >/dev/null 2>&1 || true
-    fi
+fetch_latest_url(){
+  local GOARCH="$1"
+  # 使用 GitHub API 获取对应资产下载链接（优先 .tar.xz，其次 .tar.gz）
+  local url
+  url=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+        | jq -r ".assets[] | select(.name|test(\"linux-${GOARCH}\\\\.(tar\\\\.(xz|gz))$\")) | .browser_download_url" \
+        | head -n1 || true)
+  printf "%s" "${url:-}"
+}
+install_singbox(){
+  install_prereqs
+  if [[ -x "$BIN_PATH" ]]; then
+    info "检测到 sing-box：$("$BIN_PATH" version 2>/dev/null || echo '已安装')"
+    return 0
   fi
+  local GOARCH; GOARCH=$(arch_map)
+  local url; url=$(fetch_latest_url "$GOARCH")
+  if [[ -z "$url" ]]; then
+    err "未能自动获取 sing-box 最新版本下载地址，请稍后重试或手动安装。"
+    exit 1
+  fi
+  info "下载 sing-box (${GOARCH}) ..."
+  local tmpdir; tmpdir="$(mktemp -d)"
+  local tarfile="${tmpdir}/sb.tar"
+  curl -fsSL "$url" -o "$tarfile"
+  mkdir -p "${tmpdir}/x"
+  # 兼容 xz/gz 两种格式
+  if file "$tarfile" | grep -qi xz; then
+    tar -xJf "$tarfile" -C "${tmpdir}/x"
+  else
+    tar -xzf "$tarfile" -C "${tmpdir}/x"
+  fi
+  local bin; bin="$(find "${tmpdir}/x" -type f -name sing-box -perm -u+x | head -n1 || true)"
+  [[ -n "$bin" ]] || { err "解包失败：未找到 sing-box 可执行文件"; exit 1; }
+  install -m 0755 "$bin" "$BIN_PATH"
+  setcap 'cap_net_bind_service=+ep' "$BIN_PATH" 2>/dev/null || true
+  info "已安装：$("$BIN_PATH" version 2>/dev/null || echo 'sing-box')"
+  rm -rf "$tmpdir"
 }
 
 ########################  端口（五位随机且不重复）  ########################
@@ -186,8 +169,7 @@ rand_ports_reset(){ PORTS=(); }
 
 ########################  保存/加载  ########################
 save_env(){ cat > "${SB_DIR}/env.conf" <<EOF
-IMAGE=$IMAGE
-CONTAINER_NAME=$CONTAINER_NAME
+BIN_PATH=$BIN_PATH
 ENABLE_VLESS_REALITY=$ENABLE_VLESS_REALITY
 ENABLE_VLESS_GRPCR=$ENABLE_VLESS_GRPCR
 ENABLE_TROJAN_REALITY=$ENABLE_TROJAN_REALITY
@@ -248,7 +230,7 @@ EOF
   local qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "?")
   echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已应用原版 BBR${C_RESET}"
   echo "  当前拥塞算法: $cc"; echo "  默认队列:     $qd"; echo
-  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
+  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
 }
 
 ########################  防火墙  ########################
@@ -268,7 +250,6 @@ _open_iptables(){
     [[ "$proto" == "tcp" ]] && iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
     [[ "$proto" == "udp" ]] && iptables -C INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$port" -j ACCEPT
   done
-  # 持久化
   if [[ "$OS_FAMILY" == "debian" ]]; then
     pkg_install iptables-persistent >/dev/null 2>&1 || true
     command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
@@ -301,61 +282,44 @@ open_firewall(){
   fi
 }
 
-########################  Compose & Systemd  ########################
-compose_up_recreate(){
-  (cd "$SB_DIR" && dcomp up -d --force-recreate) || {
-    warn "compose 强制重建失败，尝试重启容器"
-    docker restart "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  }
-}
-write_compose(){
-cat > "$SB_DIR/docker-compose.yml" <<EOF
-services:
-  sing-box:
-    image: $IMAGE
-    container_name: $CONTAINER_NAME
-    restart: always
-    network_mode: host
-    volumes:
-      - $SB_DIR/config.json:/etc/sing-box/config.json:ro
-      - $SB_DIR/data:/var/lib/sing-box
-      - $SB_DIR/cert:/etc/sing-box/cert:ro
-    command: >
-      -D /var/lib/sing-box
-      -C /etc/sing-box
-      run
-EOF
-}
+########################  Systemd  ########################
 write_systemd(){
-  if command -v systemctl >/dev/null 2>&1; then
 cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
 [Unit]
-Description=Sing-Box (Docker Compose)
-After=network-online.target docker.service
-Wants=network-online.target docker.service
+Description=Sing-Box (Native)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=oneshot
-WorkingDirectory=$SB_DIR
-ExecStart=/usr/bin/env bash -c '/usr/bin/docker compose up -d --force-recreate || /usr/bin/docker-compose up -d --force-recreate'
-RemainAfterExit=yes
+Type=simple
+ExecStart=${BIN_PATH} -D ${DATA_DIR} -C ${SB_DIR} run
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
-  fi
+  systemctl daemon-reload
+  systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 }
 
 ########################  生成凭据/端口/证书/配置  ########################
 rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
 rand_b64_32(){ openssl rand -base64 32 | tr -d '\n'; }
-gen_uuid(){ docker run --rm "$IMAGE" generate uuid; }
-gen_reality(){ docker run --rm "$IMAGE" generate reality-keypair; }
+gen_uuid(){
+  if [[ -x "$BIN_PATH" ]]; then "$BIN_PATH" generate uuid 2>/dev/null || true; fi
+  command -v uuidgen >/dev/null 2>&1 && uuidgen || cat /proc/sys/kernel/random/uuid
+}
+gen_reality(){
+  require_cmd "$BIN_PATH"
+  "$BIN_PATH" generate reality-keypair
+}
 
 mk_cert(){
-  local crt="$SB_DIR/cert/fullchain.pem" key="$SB_DIR/cert/key.pem"
+  local crt="${CERT_DIR}/fullchain.pem" key="${CERT_DIR}/key.pem"
   if [[ ! -s "$crt" || ! -s "$key" ]]; then
     info "生成自签证书 ..."
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 -nodes \
@@ -400,7 +364,6 @@ ensure_creds(){
   [[ -z "${SS2022_KEY:-}" ]]    && SS2022_KEY=$(rand_b64_32)
   [[ -z "${SS_PWD:-}" ]]        && SS_PWD=$(openssl rand -base64 24 | tr -d '=\n' | tr '+/' '-_')
 
-  # TUIC：用户ID和密码都用 UUID
   TUIC_UUID="$UUID"
   TUIC_PWD="$UUID"
 
@@ -409,13 +372,12 @@ ensure_creds(){
 
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
-  docker pull "$IMAGE" >/dev/null || true
   ensure_creds
   save_all_ports
   mk_cert
-  local CRT="/etc/sing-box/cert/fullchain.pem" KEY="/etc/sing-box/cert/key.pem"
+  local CRT="${CERT_DIR}/fullchain.pem" KEY="${CERT_DIR}/key.pem"
 
-  cat > "$SB_DIR/config.json" <<EOF
+  cat > "$CONF_JSON" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
   "inbounds": [
@@ -508,12 +470,12 @@ write_config(){
 }
 EOF
 
-  # 清理历史残留
-  jq '.inbounds = [ .inbounds[] | select(.tag!="vless-h2r" and .tag!="stls-ss" and .type!="shadowtls") ]' \
-    "$SB_DIR/config.json" > "$SB_DIR/config.json.tmp" && mv "$SB_DIR/config.json.tmp" "$SB_DIR/config.json"
+  # 清理历史残留（与原脚本相同）
+  if command -v jq >/dev/null 2>&1; then
+    jq '.inbounds = [ .inbounds[] | select(.tag!="vless-h2r" and .tag!="stls-ss" and .type!="shadowtls") ]' \
+      "$CONF_JSON" > "$CONF_JSON.tmp" && mv "$CONF_JSON.tmp" "$CONF_JSON"
+  fi
 
-  write_compose
-  write_systemd
   save_env
 }
 
@@ -650,15 +612,102 @@ print_manual_params(){
 }
 
 ########################  状态块/状态条  ########################
+OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
+status_bar(){
+  local svc_stat bbr_stat
+  if systemctl is-active --quiet "${SYSTEMD_SERVICE}" 2>/dev/null; then svc_stat="${OK} 运行中"; else
+    if pgrep -x sing-box >/dev/null 2>&1; then svc_stat="${OK} 运行中(非systemd)"; else svc_stat="${NO} 未运行"; fi
+  fi
+  local cc qd; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
+  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
+  if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
+  echo -e "${C_DIM}系统状态：${C_RESET} Sing-Box：${svc_stat}    BBR：${bbr_stat}"
+}
+
+########################  升级/清理  ########################
+update_binary(){
+  info "升级 sing-box 二进制 ..."
+  rm -f "$BIN_PATH" 2>/dev/null || true
+  install_singbox
+  systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：二进制已更新${C_RESET}"
+  read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+}
+update_plus_script(){
+  ensure_dirs; local tmp; tmp="$(mktemp)"
+  if ! curl -fsSL "$PLUS_RAW_URL" -o "$tmp"; then
+    echo -e "${C_BOLD}${C_RED}★ 执行结果：获取远程脚本失败${C_RESET}"; rm -f "$tmp"
+  else
+    if [[ -f "$PLUS_LOCAL" ]] && cmp -s "$PLUS_LOCAL" "$tmp"; then
+      echo -e "${C_BOLD}${C_GREEN}★ 执行结果：脚本已是最新版（$PLUS_LOCAL）${C_RESET}"
+    else
+      install -m 0755 "$tmp" "$PLUS_LOCAL"
+      echo -e "${C_BOLD}${C_GREEN}★ 执行结果：脚本已更新（$PLUS_LOCAL）${C_RESET}"
+    fi
+    rm -f "$tmp"
+  fi
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+}
+
+########################  核心操作（原生）  ########################
+deploy_native(){
+  install_singbox
+  ensure_dirs; write_config
+  info "检查配置 ..."
+  "$BIN_PATH" check -c "$CONF_JSON"
+
+  info "写入并启用 systemd 服务 ..."
+  write_systemd
+  systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+
+  open_firewall
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：部署完成（原生）${C_RESET}"; echo
+  show_status_block; print_manual_params; print_links
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x || true; [[ "${x:-}" == q ]] && exit 0
+}
+restart_service(){
+  systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：服务已重启${C_RESET}"
+  show_status_block
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+}
+rotate_ports(){
+  load_env; load_creds || { err "未找到凭据，请先部署"; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true; return 1; }
+  echo; info "随机更换所有端口 ..."
+  PORTS=()
+  PORT_VLESSR=$(gen_port); PORT_VLESS_GRPCR=$(gen_port); PORT_TROJANR=$(gen_port); PORT_HY2=$(gen_port); PORT_VMESS_WS=$(gen_port)
+  PORT_HY2_OBFS=$(gen_port); PORT_SS2022=$(gen_port); PORT_SS=$(gen_port); PORT_TUIC=$(gen_port)
+  save_ports; write_config
+  "$BIN_PATH" check -c "$CONF_JSON"
+  systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  open_firewall
+  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：端口已全部更换（五位随机且互不重复）${C_RESET}"
+  show_status_block; print_manual_params; print_links
+  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x || true; [[ "${x:-}" == q ]] && exit 0
+}
+uninstall_all(){
+  read "${READ_OPTS[@]}" -p "确认卸载并删除 ${SB_DIR} ? (y/N): " yn || true
+  [[ "${yn,,}" == y ]] || { echo "已取消"; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true; return; }
+  systemctl disable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  systemctl stop "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${SYSTEMD_SERVICE}"
+  systemctl daemon-reload || true
+  rm -rf "$SB_DIR"
+  rm -f "$BIN_PATH"
+  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+}
+
+########################  UI  ########################
 show_status_block(){
   load_env; load_ports || true
   local ip; ip=$(get_ip)
   echo -e "${C_BLUE}${C_BOLD}运行状态${C_RESET}"; hr
-  { echo -e "名称\t镜像\t状态"
-    docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Names}}\t{{.Image}}\t{{.Status}}"; } \
-  | column -t -s $'\t'
+  echo -e "名称\t二进制\t状态" | column -t -s $'\t'
+  local st="未运行"; systemctl is-active --quiet "${SYSTEMD_SERVICE}" && st="运行中" || { pgrep -x sing-box >/dev/null && st="运行中(非systemd)"; }
+  echo -e "sing-box\t${BIN_PATH}\t${st}" | column -t -s $'\t'
   hr
   echo -e "${C_DIM}配置目录:${C_RESET} $SB_DIR"
+  echo -e "${C_DIM}数据目录:${C_RESET} $DATA_DIR"
   echo -e "${C_DIM}服务器 IP:${C_RESET} $ip"
   echo
   echo -e "${C_BLUE}${C_BOLD}已启用协议与端口${C_RESET}"; hr
@@ -673,101 +722,28 @@ show_status_block(){
   [[ "$ENABLE_TUIC" == true ]]           && echo "  - TUIC v5 (UDP):                 ${PORT_TUIC:-?}"
   hr
 }
-OK="${C_GREEN}✔${C_RESET}"; NO="${C_RED}✘${C_RESET}"; WAIT="${C_YELLOW}…${C_RESET}"
-status_bar(){
-  local docker_stat bbr_stat sbox_stat raw
-  if command -v docker >/dev/null 2>&1; then
-    if systemctl is-active --quiet docker 2>/dev/null || pgrep -x dockerd >/dev/null; then docker_stat="${OK} 运行中"; else docker_stat="${NO} 未运行"; fi
-  else docker_stat="${NO} 未安装"; fi
-  local cc qd; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "未知")
-  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "未知")
-  if [[ "$cc" == "bbr" ]]; then bbr_stat="${OK} 已启用（bbr）"; else bbr_stat="${NO} 未启用（当前：${cc}，队列：${qd}）"; fi
-  if command -v docker >/dev/null 2>&1; then raw=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "none"); else raw="none"; fi
-  case "$raw" in
-    running)   sbox_stat="${OK} 运行中";;
-    exited)    sbox_stat="${NO} 已停止";;
-    created)   sbox_stat="${NO} 未启动";;
-    restarting)sbox_stat="${WAIT} 重启中";;
-    paused)    sbox_stat="${NO} 已暂停";;
-    none|*)    sbox_stat="${NO} 未部署";;
-  esac
-  echo -e "${C_DIM}系统状态：${C_RESET} Docker：${docker_stat}    BBR：${bbr_stat}    Sing-Box：${sbox_stat}"
-}
 
-########################  核心操作  ########################
-deploy_stack(){
-  install_docker; selinux_tune; ensure_dirs; write_config
-  docker run --rm -v "$SB_DIR/config.json:/config.json:ro" -v "$SB_DIR/cert:/etc/sing-box/cert:ro" "$IMAGE" check -c /config.json
-  info "启动/更新容器 ..."; compose_up_recreate; systemctl start "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
-  open_firewall
-  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：部署完成${C_RESET}"; echo
-  show_status_block; print_manual_params; print_links
-  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0
-}
-restart_stack(){ load_env; compose_up_recreate; echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：容器已重启${C_RESET}"; show_status_block; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
-update_image(){
-  load_env; install_docker
-  local before after; before=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
-  docker pull "$IMAGE" >/dev/null || true; compose_up_recreate
-  after=$(docker image inspect "$IMAGE" -f '{{index .RepoDigests 0}}' 2>/dev/null || echo "none")
-  echo; if [[ "$before" == "$after" ]]; then echo -e "${C_BOLD}${C_GREEN}★ 执行结果：当前已是最新版（$IMAGE）${C_RESET}"; else echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已更新至最新镜像（$IMAGE）${C_RESET}"; fi
-  show_status_block; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
-update_plus_script(){
-  ensure_dirs; local tmp; tmp="$(mktemp)"
-  if ! curl -fsSL "$PLUS_RAW_URL" -o "$tmp"; then echo -e "${C_BOLD}${C_RED}★ 执行结果：获取远程脚本失败${C_RESET}"; rm -f "$tmp"
-  else
-    if [[ -f "$PLUS_LOCAL" ]] && cmp -s "$PLUS_LOCAL" "$tmp"; then echo -e "${C_BOLD}${C_GREEN}★ 执行结果：脚本已是最新版（$PLUS_LOCAL）${C_RESET}"
-    else install -m 0755 "$tmp" "$PLUS_LOCAL"; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：脚本已更新（$PLUS_LOCAL）${C_RESET}"; fi
-    rm -f "$tmp"
-  fi
-  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; }
-rotate_ports(){
-  load_env; load_creds || { err "未找到凭据，请先部署"; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; return 1; }
-  echo; info "随机更换所有端口 ..."
-  PORTS=()
-  PORT_VLESSR=$(gen_port); PORT_VLESS_GRPCR=$(gen_port); PORT_TROJANR=$(gen_port); PORT_HY2=$(gen_port); PORT_VMESS_WS=$(gen_port)
-  PORT_HY2_OBFS=$(gen_port); PORT_SS2022=$(gen_port); PORT_SS=$(gen_port); PORT_TUIC=$(gen_port)
-  save_ports; write_config
-  docker run --rm -v "$SB_DIR/config.json:/config.json:ro" -v "$SB_DIR/cert:/etc/sing-box/cert:ro" "$IMAGE" check -c /config.json
-  compose_up_recreate; open_firewall
-  echo -e "${C_BOLD}${C_GREEN}★ 执行结果：端口已全部更换（五位随机且互不重复）${C_RESET}"
-  show_status_block; print_manual_params; print_links
-  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0
-}
-uninstall_all(){
-  read "${READ_OPTS[@]}" -p "确认卸载并删除 ${SB_DIR} ? (y/N): " yn
-  [[ "${yn,,}" == y ]] || { echo "已取消"; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _; return; }
-  (cd "$SB_DIR" && dcomp down) || true
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl disable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${SYSTEMD_SERVICE}"; systemctl daemon-reload || true
-  fi
-  rm -rf "$SB_DIR"
-  echo; echo -e "${C_BOLD}${C_GREEN}★ 执行结果：已卸载完成${C_RESET}"; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _
-}
-
-########################  菜单  ########################
 menu(){
   fix_tty; banner
   echo -e "${C_BOLD}${C_BLUE}================  管 理 菜 单  ================${C_RESET}"
-  echo -e "  ${C_GREEN}1)${C_RESET} 安装 Sing-Box"
+  echo -e "  ${C_GREEN}1)${C_RESET} 安装/部署 Sing-Box（原生）"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看状态 & 分享链接"
-  echo -e "  ${C_GREEN}3)${C_RESET} 重启容器"
-  echo -e "  ${C_GREEN}4)${C_RESET} 更新 Sing-Box Docker 镜像"
+  echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
+  echo -e "  ${C_GREEN}4)${C_RESET} 升级 Sing-Box 二进制"
   echo -e "  ${C_GREEN}5)${C_RESET} 更新脚本"
   echo -e "  ${C_GREEN}6)${C_RESET} 一键更换所有端口（五位随机且互不重复）"
-  echo -e "  ${C_GREEN}7)${C_RESET} 一键开启 BBR 加速"
-  echo -e "  ${C_GREEN}8)${C_RESET} 卸载"
-  echo -e "  ${C_GREEN}0)${C_RESET} 退出"
+  echo -e "  ${C_GREEN}7)${CRESET} 一键开启 BBR 加速"
+  echo -e "  ${C_GREEN}8)${CRESET} 卸载"
+  echo -e "  ${C_GREEN}0)${CRESET} 退出"
   echo -e "${C_BOLD}${C_BLUE}===============================================${C_RESET}"
   status_bar
-  read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op
+  read "${READ_OPTS[@]}" -p "选择操作（回车退出）: " op || true
   [[ -z "${op:-}" ]] && exit 0
   case "$op" in
-    1) deploy_stack;;
-    2) show_status_block; print_manual_params; print_links; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x; [[ "${x:-}" == q ]] && exit 0;;
-    3) restart_stack;;
-    4) update_image;;
+    1) deploy_native;;
+    2) show_status_block; print_manual_params; print_links; echo; read "${READ_OPTS[@]}" -p "按回车返回菜单，输入 q 退出: " x || true; [[ "${x:-}" == q ]] && exit 0;;
+    3) restart_service;;
+    4) update_binary;;
     5) update_plus_script;;
     6) rotate_ports;;
     7) enable_bbr;;
@@ -778,5 +754,5 @@ menu(){
 }
 
 ########################  主入口  ########################
-need_root; pkg_detect; pkg_update; ensure_dirs; install_docker; selinux_tune
+need_root; pkg_detect; pkg_update; ensure_dirs
 while true; do menu; done
