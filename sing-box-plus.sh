@@ -8,7 +8,7 @@
 #  - 自动 wgcf 生成 WARP 出站
 #  - 端口 10000–65535，18 个互不重复
 #  - 菜单：部署/链接/重启/换端口/BBR/卸载
-# Version: v2.0.0
+# Version: v2.0.1
 # =======================================================
 set -euo pipefail
 
@@ -297,7 +297,8 @@ ensure_warp_profile(){
   WARP_PRIVATE_KEY=$(awk -F'= ' '/PrivateKey/{print $2}' "$prof")
   WARP_PEER_PUBLIC_KEY=$(awk -F'= ' '/PublicKey/{print $2}' "$prof")
   local ep; ep=$(awk -F'= ' '/Endpoint/{print $2}' "$prof")
-  WARP_ENDPOINT_HOST=${ep%:*}; WARP_ENDPOINT_PORT=${ep##*:}
+  WARP_ENDPOINT_HOST=${ep*%:*}; WARP_ENDPOINT_HOST=${WARP_ENDPOINT_HOST:-${ep%:*}}
+  WARP_ENDPOINT_PORT=${ep##*:}
   local ad; ad=$(awk -F'= ' '/Address/{print $2}' "$prof" | tr -d " ")
   WARP_ADDRESS_V4=${ad%%,*}; WARP_ADDRESS_V6=${ad##*,}
   local rs; rs=$(awk -F'= ' '/Reserved/{print $2}' "$prof" | tr -d " ")
@@ -350,17 +351,17 @@ write_config(){
   --arg W4 "${WARP_ADDRESS_V4:-}" --arg W6 "${WARP_ADDRESS_V6:-}" \
   --argjson WR1 "${WARP_RESERVED_1:-0}" --argjson WR2 "${WARP_RESERVED_2:-0}" --argjson WR3 "${WARP_RESERVED_3:-0}" \
   '
-  def inbound_vless(port): {type:"vless", listen:"0.0.0.0", listen_port:port, users:[{uuid:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
-  def inbound_vless_flow(port): {type:"vless", listen:"0.0.0.0", listen_port:port, users:[{uuid:$UID, flow:"xtls-rprx-vision"}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
-  def inbound_trojan(port): {type:"trojan", listen:"0.0.0.0", listen_port:port, users:[{password:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
-  def inbound_hy2(port): {type:"hysteria2", listen:"0.0.0.0", listen_port:port, users:[{name:"hy2", password:$HY2}], tls:{enabled:true, certificate_path:$CRT, key_path:$KEY}};
-  def inbound_vmess_ws(port): {type:"vmess", listen:"0.0.0.0", listen_port:port, users:[{uuid:$UID}], transport:{type:"ws", path:$VMWS}};
-  def inbound_hy2_obfs(port): {type:"hysteria2", listen:"0.0.0.0", listen_port:port, users:[{name:"hy2", password:$HY22}], obfs:{type:"salamander", password:$HY2O}, tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
-  def inbound_ss2022(port): {type:"shadowsocks", listen:"0.0.0.0", listen_port:port, method:"2022-blake3-aes-256-gcm", password:$SS2022};
-  def inbound_ss(port): {type:"shadowsocks", listen:"0.0.0.0", listen_port:port, method:"aes-256-gcm", password:$SSPWD};
-  def inbound_tuic(port): {type:"tuic", listen:"0.0.0.0", listen_port:port, users:[{uuid:$TUICUUID, password:$TUICPWD}], congestion_control:"bbr", tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
+  def inbound_vless($port): {type:"vless", listen:"0.0.0.0", listen_port:$port, users:[{uuid:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
+  def inbound_vless_flow($port): {type:"vless", listen:"0.0.0.0", listen_port:$port, users:[{uuid:$UID, flow:"xtls-rprx-vision"}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
+  def inbound_trojan($port): {type:"trojan", listen:"0.0.0.0", listen_port:$port, users:[{password:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
+  def inbound_hy2($port): {type:"hysteria2", listen:"0.0.0.0", listen_port:$port, users:[{name:"hy2", password:$HY2}], tls:{enabled:true, certificate_path:$CRT, key_path:$KEY}};
+  def inbound_vmess_ws($port): {type:"vmess", listen:"0.0.0.0", listen_port:$port, users:[{uuid:$UID}], transport:{type:"ws", path:$VMWS}};
+  def inbound_hy2_obfs($port): {type:"hysteria2", listen:"0.0.0.0", listen_port:$port, users:[{name:"hy2", password:$HY22}], obfs:{type:"salamander", password:$HY2O}, tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
+  def inbound_ss2022($port): {type:"shadowsocks", listen:"0.0.0.0", listen_port:$port, method:"2022-blake3-aes-256-gcm", password:$SS2022};
+  def inbound_ss($port): {type:"shadowsocks", listen:"0.0.0.0", listen_port:$port, method:"aes-256-gcm", password:$SSPWD};
+  def inbound_tuic($port): {type:"tuic", listen:"0.0.0.0", listen_port:$port, users:[{uuid:$TUICUUID, password:$TUICPWD}], congestion_control:"bbr", tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
 
-  def warp_outbound():
+  def warp_outbound:
     {type:"wireguard", tag:"warp",
       server:$WHOST, server_port:$WPORT,
       local_address: ( [ $W4, $W6 ] | map(select(. != "")) ),
@@ -394,7 +395,7 @@ write_config(){
     ],
     outbounds: (
       if $ENABLE_WARP=="true" and ($WPRIV|length)>0 and ($WHOST|length)>0 then
-        [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}, warp_outbound()]
+        [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}, warp_outbound]
       else
         [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}]
       end
