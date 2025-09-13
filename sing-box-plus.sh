@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.0.3"
+SCRIPT_VERSION="v2.0.4"
 
 # 兼容 1.12.x 旧 WireGuard 出站
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
@@ -19,6 +19,37 @@ C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
+# —— 链接分组美化输出（不改你原来的生成逻辑） ——
+group_links() {
+  local C_RESET="\033[0m" C_BOLD="\033[1m" C_DIM="\033[2m" C_BLUE="\033[34m"
+  local direct=() warp=()
+  local line
+  # 只收集真正的链接行，然后按是否含 -warp（出现在结尾名字里）分组
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*(vless|trojan|vmess|hy2|ss|tuic):// ]] || continue
+    if [[ "$line" == *"-warp"* ]]; then
+      warp+=("$line")
+    else
+      direct+=("$line")
+    fi
+  done
+
+  # 直连区
+  echo
+  echo -e "${C_BLUE}${C_BOLD}【直连节点（9）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
+  printf "${C_DIM}─────────────────────────────────────────────────────────────${C_RESET}\n"
+  ((${#direct[@]})) && for line in "${direct[@]}"; do echo "  $line"; done
+  printf "${C_DIM}─────────────────────────────────────────────────────────────${C_RESET}\n\n"
+
+  # WARP 区
+  echo -e "${C_BLUE}${C_BOLD}【WARP 节点（9）】${C_RESET}（同上 9 种，带 -warp）"
+  echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
+  echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
+  printf "${C_DIM}─────────────────────────────────────────────────────────────${C_RESET}\n"
+  ((${#warp[@]})) && for line in "${warp[@]}"; do echo "  $line"; done
+  printf "${C_DIM}─────────────────────────────────────────────────────────────${C_RESET}\n"
+  echo
+}
 banner(){ clear; echo -e "${C_CYAN}${C_BOLD}$SCRIPT_NAME ${SCRIPT_VERSION}${C_RESET}"; hr; }
 READ_OPTS=(-e -r)
 
@@ -427,7 +458,11 @@ open_firewall(){
 
 # ===== 分享链接 =====
 print_links(){
-  load_env; load_creds; load_ports; local ip; ip=$(get_ip); local links=()
+  load_env; load_creds; load_ports
+  local ip; ip=$(get_ip)
+  local links=()
+
+  # ---- 直连 9 ----
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality")
@@ -441,6 +476,7 @@ JSON
   links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS}#ss")
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC}?congestion_control=bbr&alpn=h3alpn=h3&insecure=1insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5")
 
+  # ---- WARP 9 ----
   links+=("vless://${UUID}@${ip}:${PORT_VLESSR_W}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality-warp")
   links+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR_W}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality-warp")
   links+=("trojan://${UUID}@${ip}:${PORT_TROJANR_W}?security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#trojan-reality-warp")
@@ -454,7 +490,26 @@ JSON
   links+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS_W}#ss-warp")
   links+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC_W}?congestion_control=bbr&alpn=h3alpn=h3&insecure=1insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5-warp")
 
-  echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"; hr; for l in "${links[@]}"; do echo "  $l"; done; hr
+  # —— 从 links[] 分组打印 ——（不改变上面任何生成逻辑）
+  local direct=() warp=()
+  for l in "${links[@]}"; do
+    # 以末尾名称是否包含 -warp 来分组，与你稳定版的命名完全一致
+    if [[ "$l" =~ \#.*-warp$ ]]; then
+      warp+=("$l")
+    else
+      direct+=("$l")
+    fi
+  done
+
+  echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"; hr
+
+  echo -e "${C_BLUE}${C_BOLD}【直连节点（9）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
+  hr; for l in "${direct[@]}"; do echo "  $l"; done; hr; echo
+
+  echo -e "${C_BLUE}${C_BOLD}【WARP 节点（9）】${C_RESET}（同上 9 种，带 -warp）"
+  echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
+  echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
+  hr; for l in "${warp[@]}"; do echo "  $l"; done; hr
 }
 
 # ===== 运维 =====
@@ -497,7 +552,7 @@ deploy_native(){
   open_firewall
   echo; echo -e "${C_BOLD}${C_GREEN}★ 部署完成（18 节点）${C_RESET}"; echo
   print_links
-  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+  exit 0
 }
 menu(){
   banner
@@ -512,7 +567,7 @@ menu(){
   read "${READ_OPTS[@]}" -p "选择: " op || true
   case "${op:-}" in
     1) deploy_native;;
-    2) ensure_installed_or_hint && { print_links; read -p "回车返回..." _ || true; };;
+    2) ensure_installed_or_hint && { print_links;exit 0; };;
     3) ensure_installed_or_hint && restart_service;;
     4) ensure_installed_or_hint && rotate_ports;;
     5) enable_bbr;;
