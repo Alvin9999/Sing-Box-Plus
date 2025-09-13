@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.2
+#  Version: v2.1.3
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
 #   - 保留原稳定版的 18 节点实现逻辑与链接格式；
 #   - 修复 SS2022 psk base64 报错；
 #   - “查看分享链接 / 安装部署完成”后自动退出；
 #   - 卸载后自动退出；
-#   - WARP 采用 wgcf 自动生成账号与 profile。
+#   - WARP 采用 wgcf 自动生成账号与 profile；
+#   - 移除 urlenc() 的 heredoc，避免 “wanted 'PY'” 报错。
 # ============================================================
 
 set -Eeuo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.1.2"
+SCRIPT_VERSION="v2.1.3"
 
 # 兼容 sing-box 1.12.x 的旧 wireguard 出站
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
@@ -51,13 +52,33 @@ READ_OPTS=(-e -r)
 
 # ===== 工具函数 =====
 b64enc(){ base64 -w 0 2>/dev/null || base64; }
-urlenc(){ python3 - <<'PY' "$1" 2>/dev/null || python - <<'PY' "$1" 2>/dev/null || busybox sh -c 'echo "$1"' ; exit 0
-import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""));PY
+
+# URL 编码：优先 jq，其次 python3，最后纯 Bash 兜底（无 heredoc）
+urlenc(){
+  local s="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -rn --arg x "$s" '$x|@uri'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$s"
+  elif command -v python >/dev/null 2>&1; then
+    python -c 'import sys,urllib;print urllib.quote(sys.argv[1],"")' "$s" 2>/dev/null || printf '%s' "$s"
+  else
+    # 最简 Bash 版（RFC3986 允许的未编码字符：ALNUM . _ ~ -）
+    local out="" c hex
+    for ((i=0;i<${#s};i++)); do
+      c="${s:i:1}"
+      case "$c" in [a-zA-Z0-9._~-]) out+="$c";; ' ') out+='%20';;
+        *) printf -v hex '%%%02X' "'$c"; out+="$hex";;
+      esac
+    done
+    printf '%s' "$out"
+  fi
 }
 
 # 标准 base64（包含 = 结尾也保留），用于 SS2022
 rand_b64_32(){ openssl rand -base64 32 | tr -d '\n'; }
 rand_hex8(){  head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
 gen_uuid(){
   local u=""
   if command -v sing-box >/dev/null 2>&1; then u=$(sing-box generate uuid 2>/dev/null | head -n1 || true); fi
@@ -65,11 +86,13 @@ gen_uuid(){
   [[ -z "$u" ]] && u=$(cat /proc/sys/kernel/random/uuid)
   printf '%s' "$u" | tr -d '\r\n'
 }
+
 gen_reality(){
   sing-box generate reality-keypair 2>/dev/null || {
     err "生成 Reality 密钥失败"; return 1;
   }
 }
+
 get_ip(){
   local ip
   ip=$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null || true)
@@ -143,7 +166,6 @@ EOF
 
 # ===== 端口与凭据生成（不改逻辑，只是写法稳健） =====
 alloc_ports(){
-  # 随机分配端口（不与系统常用端口冲突）
   PORT_VLESSR=$(shuf -i 10000-19999 -n 1)
   PORT_VLESS_GRPCR=$(shuf -i 10000-19999 -n 1)
   PORT_TROJANR=$(shuf -i 10000-19999 -n 1)
@@ -183,8 +205,8 @@ ensure_creds(){
     REALITY_SID=$(rand_hex8)
   fi
 
-  [[ -z "${HY2_PWD:-}"    ]] && HY2_PWD=$(openssl rand -base64 16 | tr -d '\n')
-  [[ -z "${HY2_PWD2:-}"   ]] && HY2_PWD2=$(rand_b64_32)
+  [[ -z "${HY2_PWD:-}"      ]] && HY2_PWD=$(openssl rand -base64 16 | tr -d '\n')
+  [[ -z "${HY2_PWD2:-}"     ]] && HY2_PWD2=$(rand_b64_32)
   [[ -z "${HY2_OBFS_PWD:-}" ]] && HY2_OBFS_PWD=$(openssl rand -base64 16 | tr -d '\n')
 
   # 关键修复：SS2022 必须是“标准 base64”
@@ -255,14 +277,19 @@ prepare_warp(){
   fi
 
   # 解析 profile
-  WPRIV=$(awk -F'= ' '/PrivateKey/{print $2}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '\r')
-  WLOCAL_V4=$(awk -F'= ' '/Address = /{print $2}' "$WGCF_DIR/wgcf-profile.conf" | head -n1 | tr -d '\r"')
-  WLOCAL_V6=$(awk -F'= ' '/Address = /{print $2}' "$WGCF_DIR/wgcf-profile.conf" | sed -n '2p' | tr -d '\r"')
-  local ep; ep=$(awk -F'= ' '/Endpoint/{print $2}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '\r"')
+  WPRIV=$(awk -F'= *' '/^PrivateKey/{gsub(/\r/,"");print $2}' "$WGCF_DIR/wgcf-profile.conf")
+  # Address = 172.16.0.2/32, 2606:4700:...
+  local addr_line
+  addr_line=$(awk -F'= *' '/^Address/{gsub(/\r/,"");print $2;exit}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '"')
+  WLOCAL_V4="${addr_line%%,*}"
+  WLOCAL_V6="${addr_line##*, }"
+  local ep; ep=$(awk -F'= *' '/^Endpoint/{gsub(/\r/,"");print $2;exit}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '"')
   WHOST=${ep%:*}; WPORT=${ep##*:}
-  WPEER_PUB=$(awk -F'= ' '/PublicKey/{print $2}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '\r"')
+  WPEER_PUB=$(awk -F'= *' '/^PublicKey/{gsub(/\r/,"");print $2;exit}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '"')
   # Reserved = x, y, z
-  read -r WRSV0 WRSV1 WRSV2 < <(awk -F'= ' '/Reserved/{print $2}' "$WGCF_DIR/wgcf-profile.conf" | tr -d '\r"' | tr -d ' ' | tr -d ',')
+  read -r WRSV0 WRSV1 WRSV2 < <(
+    awk -F'Reserved *= *' '/^Reserved/{split($2,a,","); gsub(/ /,"",a[1]); gsub(/ /,"",a[2]); gsub(/ /,"",a[3]); print a[1],a[2],a[3]; exit}' "$WGCF_DIR/wgcf-profile.conf"
+  )
 
   save_creds
 }
@@ -414,7 +441,7 @@ EOF
 }
 
 open_firewall(){
-  # 尽量不强依赖 ufw/firewalld，简单放行
+  # 这里保持空操作，避免误放行；如需开放可自行实现
   :
 }
 
