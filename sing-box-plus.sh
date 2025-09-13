@@ -497,7 +497,7 @@ deploy_native(){
   open_firewall
   echo; echo -e "${C_BOLD}${C_GREEN}★ 部署完成（18 节点）${C_RESET}"; echo
   print_links
-  echo; read "${READ_OPTS[@]}" -p "按回车返回菜单..." _ || true
+  exit 0
 }
 menu(){
   banner
@@ -512,7 +512,7 @@ menu(){
   read "${READ_OPTS[@]}" -p "选择: " op || true
   case "${op:-}" in
     1) deploy_native;;
-    2) ensure_installed_or_hint && { print_links; read -p "回车返回..." _ || true; };;
+    2) ensure_installed_or_hint && { print_links; exit 0; };;
     3) ensure_installed_or_hint && restart_service;;
     4) ensure_installed_or_hint && rotate_ports;;
     5) enable_bbr;;
