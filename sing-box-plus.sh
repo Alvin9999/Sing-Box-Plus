@@ -20,6 +20,7 @@ C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
 # —— 链接分组美化输出（不改生成逻辑） ——
+# —— 链接分组美化输出（不改生成逻辑） ——
 group_links() {
   local line
   local -a direct=() warp=()
@@ -50,8 +51,8 @@ group_links() {
   hr
   ((${#warp[@]})) && printf '  %s\n' "${warp[@]}"
   hr
-  return 0
 }
+
 
   # 直连区
   echo
