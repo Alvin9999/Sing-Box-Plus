@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # =======================================================
 # 🚀 Sing-Box-Plus 管理脚本（直连 9 + WARP 9）
-# Version: v2.1.2
-# 本版在已验证可用的功能基础上，仅做 UI/交互优化
-# OS: Debian/Ubuntu/CentOS/RHEL/Rocky/Alma (systemd)
+# Version: v2.1.3
+# 仅优化 UI/交互 + 依赖检测修复；功能与之前成功版本一致
 # =======================================================
 set -euo pipefail
 
@@ -15,7 +14,7 @@ hr(){ printf "${C_DIM}==========================================================
 hr2(){ printf "${C_DIM}─────────────────────────────────────────────────────────────${C_RESET}\n"; }
 
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.1.2"
+SCRIPT_VERSION="v2.1.3"
 
 # ---------- 路径 ----------
 SB_DIR="/opt/sing-box"
@@ -28,11 +27,10 @@ WARP_ENV="$SB_DIR/warp.env"
 WGCF_DIR="$SB_DIR/wgcf"
 mkdir -p "$SB_DIR" "$WGCF_DIR"
 
-# ---------- 公共输出 ----------
+# ---------- 输出 ----------
 info(){ echo -e "${C_CYAN}[信息]${C_RESET} $*"; }
 warn(){ echo -e "${C_YELLOW}[警告]${C_RESET} $*"; }
 err(){  echo -e "${C_RED}[错误]${C_RESET} $*"; }
-
 need_root(){ [[ $EUID -eq 0 ]] || { err "请以 root 运行：bash $0"; exit 1; }; }
 
 # ---------- Banner 与状态 ----------
@@ -64,23 +62,40 @@ banner(){
   hr
 }
 
-# ---------- 工具 ----------
-need_cmd(){
-  command -v "$1" >/dev/null 2>&1 && return 0
+# ---------- 依赖 ----------
+_pkg_install(){
+  local pkg="$1" alt="$2"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y "$1" >/dev/null 2>&1 || true
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y "$1" >/dev/null 2>&1 || true
+    apt-get install -y "$pkg" >/dev/null 2>&1 || apt-get install -y "$alt" >/dev/null 2>&1 || return 1
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y "$1" >/dev/null 2>&1 || true
+    dnf install -y "$pkg" >/dev/null 2>&1 || dnf install -y "$alt" >/dev/null 2>&1 || return 1
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "$pkg" >/dev/null 2>&1 || yum install -y "$alt" >/dev/null 2>&1 || return 1
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "$pkg" >/dev/null 2>&1 || apk add --no-cache "$alt" >/dev/null 2>&1 || return 1
+  else
+    return 1
   fi
-  command -v "$1" >/dev/null 2>&1 || { err "依赖 $1 安装失败"; exit 1; }
+}
+need_tool(){
+  local bin="$1" pkg="$2" alt="${3:-}"
+  command -v "$bin" >/dev/null 2>&1 && return 0
+  _pkg_install "$pkg" "$alt" || true
+  command -v "$bin" >/dev/null 2>&1 || { err "依赖 $pkg 安装失败（需要可执行：$bin）"; exit 1; }
 }
 ensure_bins(){
-  for c in curl jq tar sed awk iproute2; do need_cmd "$c" || true; done
-  # uuidgen
-  command -v uuidgen >/dev/null 2>&1 || need_cmd uuid-runtime || true
+  need_tool curl curl
+  need_tool jq jq
+  need_tool tar tar
+  need_tool sed sed
+  need_tool awk gawk awk
+  # ss/ip（检测端口用）：不同系包名不同
+  if ! command -v ss >/dev/null 2>&1; then
+    _pkg_install iproute2 iproute || true
+  fi
+  # base64 一般自带；openssl 可选（用于 rand_hex）
+  command -v openssl >/dev/null 2>&1 || _pkg_install openssl openssl || true
   # wgcf
   if ! command -v wgcf >/dev/null 2>&1; then
     info "安装 wgcf ..."
@@ -91,7 +106,7 @@ ensure_bins(){
   fi
 }
 
-# 生成 UUID（单行）
+# ---------- 随机 & 端口 ----------
 gen_uuid(){
   local u=""
   if [[ -x "$BIN_PATH" ]]; then
@@ -106,10 +121,28 @@ gen_uuid(){
   printf '%s' "$u" | tr -d '\r\n'
 }
 rand(){ awk -v min=11000 -v max=49999 'BEGIN{srand();print int(min+rand()*(max-min+1))}'; }
-port_free(){ ! ss -ltnup 2>/dev/null | grep -q ":$1\b"; }
+port_free(){
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ! ss -ltnup 2>/dev/null | grep -q ":${p}\b"
+  elif command -v netstat >/dev/null 2>&1; then
+    ! netstat -tunlp 2>/dev/null | grep -q ":${p}\b"
+  else
+    # 没有检测工具就直接认为可用（极少见环境）
+    true
+  fi
+}
 gen_port(){ local p; for _ in {1..999}; do p=$(rand); port_free "$p" && { echo "$p"; return; }; done; echo 0; }
 rand_b64(){ head -c 16 /dev/urandom | base64 | tr -d '\r\n='; }
-rand_hex(){ head -c 8 /dev/urandom | xxd -p | tr -d '\r\n'; }
+rand_hex(){
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 8
+  elif command -v hexdump >/dev/null 2>&1; then
+    hexdump -vn8 -e '8/1 "%02x"' /dev/urandom
+  else
+    od -An -N8 -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
 
 # ---------- 安装 sing-box ----------
 install_singbox(){
@@ -187,10 +220,10 @@ ensure_warp(){
   # 解析
   local priv pub endpoint v4 v6 r1 r2 r3 host port ip
   priv=$(grep -m1 '^PrivateKey' "$prof" | awk '{print $3}')
-  pub=$(grep -m1 '^PublicKey' "$prof"  | awk '{print $3}')
+  pub=$(grep -m1 '^PublicKey'  "$prof" | awk '{print $3}')
   endpoint=$(grep -m1 '^Endpoint' "$prof" | awk '{print $3}')
   v4=$(grep -m1 '^Address = ' "$prof" | awk -F'[ ="]+' '{print $6}')
-  v6=$(grep -m1 '^Address = ' "$prof" | awk -F'[ ="]+' 'NR==2{print $6}')
+  v6=$(grep -m2 '^Address = ' "$prof" | awk -F'[ ="]+' 'NR==2{print $6}')
   if grep -q '^Reserved' "$prof"; then
     r1=$(sed -n 's/.*Reserved = \[\s*\([0-9]\+\),.*/\1/p' "$prof" | head -n1)
     r2=$(sed -n 's/.*Reserved = \[[0-9]\+,\s*\([0-9]\+\),.*/\1/p' "$prof" | head -n1)
@@ -377,7 +410,7 @@ print_links(){
   echo -e "${C_DIM}导出完毕：脚本将自动退出（再次运行：./sing-box-plus.sh）${C_RESET}"
 }
 
-# ---------- 部署流程 ----------
+# ---------- 部署 ----------
 deploy_native(){
   ensure_bins
   install_singbox
@@ -386,9 +419,7 @@ deploy_native(){
   ensure_warp
   write_config
   # 校验（忽略 deprecated 警告）
-  if ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"; then
-    err "配置校验失败，请查看 $CONF_JSON"; exit 1
-  fi
+  ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"
   write_systemd
   echo
   echo -e "${C_GREEN}${C_BOLD}★ 部署完成（18 节点）${C_RESET}"
@@ -396,7 +427,7 @@ deploy_native(){
   exit 0
 }
 
-# ---------- 菜单动作 ----------
+# ---------- 动作 ----------
 show_links_only(){
   if [[ ! -f "$PORTS_ENV" || ! -f "$CREDS_ENV" ]]; then
     err "未安装，请先执行 1）安装/部署"; exit 1
