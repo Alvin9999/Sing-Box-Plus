@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.0.3"
+SCRIPT_VERSION="v2.0.3-1"
 
 # 兼容 1.12.x 旧 WireGuard 出站
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
