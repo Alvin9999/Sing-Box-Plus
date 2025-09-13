@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="Sing-Box Native Manager"
-SCRIPT_VERSION="v2.0.4"
+SCRIPT_VERSION="v2.0.5"
 
 # 兼容 1.12.x 旧 WireGuard 出站
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=${ENABLE_DEPRECATED_WIREGUARD_OUTBOUND:-true}
@@ -19,20 +19,39 @@ C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"
 hr(){ printf "${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"; }
-# —— 链接分组美化输出（不改你原来的生成逻辑） ——
+# —— 链接分组美化输出（不改生成逻辑） ——
 group_links() {
-  local C_RESET="\033[0m" C_BOLD="\033[1m" C_DIM="\033[2m" C_BLUE="\033[34m"
-  local direct=() warp=()
   local line
-  # 只收集真正的链接行，然后按是否含 -warp（出现在结尾名字里）分组
+  local -a direct=() warp=()
+
+  # 从 stdin 读 18 条链接；有前导空格也匹配
   while IFS= read -r line; do
-    [[ "$line" =~ ^[[:space:]]*(vless|trojan|vmess|hy2|ss|tuic):// ]] || continue
-    if [[ "$line" == *"-warp"* ]]; then
+    [[ $line =~ ^[[:space:]]*(vless|trojan|vmess|hy2|ss|tuic):// ]] || continue
+    # 仅当“备注结尾”为 -warp 才分到 WARP 组，防止误判
+    if [[ $line =~ \#.*-warp$ ]]; then
       warp+=("$line")
     else
       direct+=("$line")
     fi
   done
+
+  # 直连区
+  echo
+  echo -e "${C_BLUE}${C_BOLD}【直连节点（9）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
+  hr
+  ((${#direct[@]})) && printf '  %s\n' "${direct[@]}"
+  hr
+  echo
+
+  # WARP 区
+  echo -e "${C_BLUE}${C_BOLD}【WARP 节点（9）】${C_RESET}（同上 9 种，带 -warp）"
+  echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
+  echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
+  hr
+  ((${#warp[@]})) && printf '  %s\n' "${warp[@]}"
+  hr
+  return 0
+}
 
   # 直连区
   echo
