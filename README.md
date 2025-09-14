@@ -1,6 +1,5 @@
 # 🚀 Sing-Box-Plus 一键管理脚本（18 节点：直连 9 + WARP 9）
 
-面向 Debian / Ubuntu 的 **sing-box 原生一键部署与管理**脚本。
 开箱即用 18 个节点（直连 9 + WARP 9），含端口一键切换、BBR 加速、分享链接导出等。
 
 * ✅ 已适配 **sing-box v1.12.x**
