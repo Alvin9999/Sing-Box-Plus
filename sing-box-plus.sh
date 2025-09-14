@@ -394,6 +394,7 @@ install_singbox() {
   else
     rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
   fi
+  info "准备获取下载地址..."
 
   # 资产名匹配：兼容 tar.gz / tar.xz / zip
   # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
@@ -406,6 +407,8 @@ install_singbox() {
            | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
   fi
   [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+
+  info "下载 sing-box 中..."
 
   tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
   if ! curl -fL "$url" -o "$pkg"; then
