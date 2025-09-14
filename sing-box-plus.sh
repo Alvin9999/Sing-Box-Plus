@@ -370,6 +370,9 @@ install_deps(){
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
+  # —— 额外：无论是否已安装，都给个状态提示 —— 
+  info "正在检查 sing-box 安装状态..."
+  
   # 已安装则直接返回
   if command -v "$BIN_PATH" >/dev/null 2>&1; then
     info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
