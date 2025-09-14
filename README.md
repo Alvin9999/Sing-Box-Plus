@@ -25,7 +25,7 @@
 * Shadowsocks（aes-256-gcm）
 * TUIC v5（ALPN h3，自签证书）
 
-​**WARP 9：**​（同上 9 种，出站经 Cloudflare WARP）
+​**WARP 9：**（同上 9 种，出站经 Cloudflare WARP）
 
 > WARP 出站更利于流媒体解锁与回程质量。脚本自动：
 > 
