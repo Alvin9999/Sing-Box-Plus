@@ -240,7 +240,15 @@ EOF
 }
 load_warp(){ safe_source_env "$SB_DIR/warp.env" || return 1; }
 
-rand_hex8(){ head -c 8 /dev/urandom | xxd -p; }
+# 生成 8 字节十六进制（16 个 hex 字符）
+rand_hex8(){
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 8 | tr -d "\n"
+  else
+    # 兜底：没有 openssl 时用 hexdump
+    hexdump -v -n 8 -e '1/1 "%02x"' /dev/urandom
+  fi
+}
 rand_b64_32(){ openssl rand -base64 32 | tr -d "\n"; }
 
 gen_uuid(){
