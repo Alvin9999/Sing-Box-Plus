@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.7
+#  Version: v2.1.6
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -370,60 +370,68 @@ install_deps(){
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
-  # 已装则跳过
-  if command -v sing-box >/dev/null 2>&1; then
-    info "检测到 sing-box: $(sing-box version | head -n1)"
-    BIN_PATH=$(command -v sing-box)
+  # 已安装则直接返回
+  if command -v "$BIN_PATH" >/dev/null 2>&1; then
+    info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
     return 0
   fi
 
-  ensure_deps  # 你的依赖检查/安装（有的话保留）
+  # 依赖
+  ensure_deps curl jq tar || return 1
+  command -v xz >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
+  command -v unzip >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
 
-  # 统一的 curl 选项：强制 IPv4 + 合理超时
-  local CURL_OPTS=${CURL_OPTS:-"-fsSL -4 --connect-timeout 3 --max-time 15"}
+  local repo="SagerNet/sing-box"
+  local tag="${SINGBOX_TAG:-latest}"   # 允许用环境变量固定版本，如 v1.12.7
+  local arch; arch="$(arch_map)"
+  local api url tmp pkg re rel_url
 
-  # 架构映射（保持你原来的逻辑）
-  local GOA
-  case "$(uname -m)" in
-    x86_64|amd64) GOA="amd64" ;;
-    aarch64|arm64) GOA="arm64" ;;
-    armv7l|armv7) GOA="armv7" ;;
-    i386|i686)    GOA="386" ;;
-    *) GOA="amd64" ;;
-  esac
+  info "下载 sing-box (${arch}) ..."
 
-  # 先给“即时反馈”
-  info "准备获取下载地址（网络解析/握手可能需要几秒）..."
-
-  # 先尝试从 API 拿最新版本的下载链接；若失败再走兜底
-  local api url
-  api="${GITHUB_API:-https://api.github.com}"
-  url="$(curl $CURL_OPTS "$api/repos/SagerNet/sing-box/releases/latest" \
-        | jq -r --arg pat "linux_${GOA}" '.assets[] | select(.name|test($pat + "(\\.tar\\.gz|\\.zip)$")) | .browser_download_url' \
-        | head -n1 2>/dev/null || true)"
-
-  # 兜底：如果 API 挂了，按已知稳定版本拼接直链（你可改成自己想固化的版本号）
-  if [[ -z "$url" ]]; then
-    local ver="1.12.8"
-    url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${GOA}.tar.gz"
+  # 取 release JSON
+  if [[ "$tag" = "latest" ]]; then
+    rel_url="https://api.github.com/repos/${repo}/releases/latest"
+  else
+    rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
   fi
 
-  info "下载 sing-box (${GOA}) ..."
-  local tmp; tmp=$(mktemp -d)
-  curl $CURL_OPTS "$url" -o "$tmp/sing-box.tar.gz" || { err "下载失败"; rm -rf "$tmp"; return 1; }
+  # 资产名匹配：兼容 tar.gz / tar.xz / zip
+  # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
+  re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
 
-  tar -xf "$tmp/sing-box.tar.gz" -C "$tmp" || { err "解压失败"; rm -rf "$tmp"; return 1; }
-  # 自动找可执行文件（不同版本包名略有变动，兼容处理）
+  # 先在目标 release 里找；找不到再从所有 releases 里兜底
+  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
+  if [[ -z "$url" ]]; then
+    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
+           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
+  fi
+  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+
+  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
+  if ! curl -fL "$url" -o "$pkg"; then
+    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
+  fi
+
+  # 解压
+  if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
+    tar -xzf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.tar\.xz$'; then
+    tar -xJf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.zip$'; then
+    unzip -q "$pkg" -d "$tmp"
+  else
+    rm -rf "$tmp"; err "未知包格式：$url"; return 1
+  fi
+
+  # 找到二进制并安装
   local bin
   bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
-  [[ -n "$bin" ]] || { err "未找到可执行文件"; rm -rf "$tmp"; return 1; }
+  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
 
-  install -m 0755 "$bin" /usr/local/bin/sing-box
+  install -m 0755 "$bin" "$BIN_PATH"
   rm -rf "$tmp"
-  BIN_PATH="/usr/local/bin/sing-box"
-  info "安装完成：$(sing-box version | head -n1)"
+  info "安装完成：$("$BIN_PATH" version | head -n1)"
 }
-
 
 # ===== systemd =====
 write_systemd(){ cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
