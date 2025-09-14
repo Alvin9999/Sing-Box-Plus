@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.6
+#  Version: v2.1.7
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -370,68 +370,90 @@ install_deps(){
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
-  # 已安装则直接返回
-  if command -v "$BIN_PATH" >/dev/null 2>&1; then
+  # 目标安装位置（若外部没给 BIN_PATH 就用默认）
+  local BIN="${BIN_PATH:-/usr/local/bin/sing-box}"
+
+  # 已安装则直接返回（两种方式都判断）
+  if command -v sing-box >/dev/null 2>&1 || [[ -x "$BIN" ]]; then
+    BIN_PATH="$(command -v sing-box 2>/dev/null || printf %s "$BIN")"
     info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
     return 0
   fi
 
-  # 依赖
+  # 依赖（尽量不跑 apt update：只在缺包时 install）
   ensure_deps curl jq tar || return 1
-  command -v xz >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
-  command -v unzip >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
+  command -v xz >/dev/null 2>&1   || ensure_deps xz-utils >/dev/null 2>&1 || true
+  command -v unzip >/dev/null 2>&1 || ensure_deps unzip    >/dev/null 2>&1 || true
+
+  # 网络请求默认参数：强制 IPv4，避免 AAAA 回落；加超时，避免“卡住”
+  local CURL_OPTS="-fsSL -4 --connect-timeout ${CURL_CONNECT_TIMEOUT:-3} --max-time ${CURL_MAX_TIME:-20}"
 
   local repo="SagerNet/sing-box"
-  local tag="${SINGBOX_TAG:-latest}"   # 允许用环境变量固定版本，如 v1.12.7
+  local tag="${SINGBOX_TAG:-latest}"            # 可通过环境变量固定版本：SINGBOX_TAG=v1.12.8
   local arch; arch="$(arch_map)"
-  local api url tmp pkg re rel_url
+  local api="${GITHUB_API:-https://api.github.com}"
+  local url tmp pkg re rel_url
 
-  info "下载 sing-box (${arch}) ..."
+  # 先给“即时反馈”，用户不再“空等”
+  info "准备获取下载地址（解析/握手可能需要几秒）..."
 
-  # 取 release JSON
+  # 选择 release JSON
   if [[ "$tag" = "latest" ]]; then
-    rel_url="https://api.github.com/repos/${repo}/releases/latest"
+    rel_url="$api/repos/${repo}/releases/latest"
   else
-    rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+    rel_url="$api/repos/${repo}/releases/tags/${tag}"
   fi
 
   # 资产名匹配：兼容 tar.gz / tar.xz / zip
-  # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
+  # 例：sing-box-1.12.8-linux-amd64.tar.gz
   re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
 
-  # 先在目标 release 里找；找不到再从所有 releases 里兜底
-  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
-  if [[ -z "$url" ]]; then
-    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
-           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
-  fi
-  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+  # 优先从目标 release 拿直链；失败再从 releases 列表兜底
+  url="$(curl $CURL_OPTS "$rel_url" \
+        | jq -r --arg re "$re" '.assets[] | select(.name|test($re)) | .browser_download_url' \
+        | head -n1 2>/dev/null || true)"
 
+  if [[ -z "$url" ]]; then
+    url="$(curl $CURL_OPTS "https://api.github.com/repos/${repo}/releases" \
+          | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name|test($re)) | .browser_download_url ][0]' \
+          2>/dev/null || true)"
+  fi
+
+  # 兜底直链（API 被限流/被墙时仍可用；版本可自定义）
+  if [[ -z "$url" ]]; then
+    local ver="${SINGBOX_FALLBACK_VER:-1.12.8}"
+    url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz"
+  fi
+
+  info "下载 sing-box (${arch}) ..."
   tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
-  if ! curl -fL "$url" -o "$pkg"; then
+  if ! curl $CURL_OPTS "$url" -o "$pkg"; then
     rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
   fi
 
-  # 解压
-  if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
+  # 解压（支持 .tar.gz / .tar.xz / .zip）
+  if [[ "$url" =~ \.tar\.gz$ || "$url" =~ \.tgz$ ]]; then
     tar -xzf "$pkg" -C "$tmp"
-  elif echo "$url" | grep -qE '\.tar\.xz$'; then
+  elif [[ "$url" =~ \.tar\.xz$ ]]; then
     tar -xJf "$pkg" -C "$tmp"
-  elif echo "$url" | grep -qE '\.zip$'; then
+  elif [[ "$url" =~ \.zip$ ]]; then
     unzip -q "$pkg" -d "$tmp"
   else
     rm -rf "$tmp"; err "未知包格式：$url"; return 1
   fi
 
-  # 找到二进制并安装
-  local bin
-  bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
-  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
+  # 找到二进制并安装（不同版本包名子目录不同，用 find 更稳）
+  local bin_path
+  bin_path="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  [[ -n "$bin_path" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
 
-  install -m 0755 "$bin" "$BIN_PATH"
+  install -m 0755 "$bin_path" "$BIN"
+  BIN_PATH="$BIN"
+
   rm -rf "$tmp"
   info "安装完成：$("$BIN_PATH" version | head -n1)"
 }
+
 
 # ===== systemd =====
 write_systemd(){ cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
