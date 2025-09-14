@@ -732,7 +732,7 @@ menu(){
   1)
     echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
     install_singbox
-    install_wgcf_if_needed   || true
+    ensure_warp_profile || true
     write_config
     write_systemd
     open_firewall
