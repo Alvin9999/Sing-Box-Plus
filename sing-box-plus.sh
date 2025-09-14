@@ -729,7 +729,17 @@ menu(){
   banner
   read -rp "选择: " op || true
   case "${op:-}" in
-    1) deploy_native ;;
+  1)
+    echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
+    install_singbox
+    install_wgcf_if_needed   || true
+    write_config
+    write_systemd
+    open_firewall
+    systemctl restart "${SYSTEMD_SERVICE}" || true
+    print_links_grouped
+    exit 0
+    ;;
     2) if ensure_installed_or_hint; then print_links_grouped; exit 0; fi ;;
     3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
    4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
