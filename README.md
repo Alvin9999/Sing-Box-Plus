@@ -139,7 +139,6 @@ Sing-Box 启动状态：运行中 / 未运行 / 未安装
 
 <pre class="overflow-visible!" data-start="3484" data-end="3958"><div class="contain-inline-size rounded-2xl relative bg-token-sidebar-surface-primary"><div class="sticky top-9"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2"><div class="bg-token-bg-elevated-secondary text-token-text-secondary flex items-center gap-4 rounded-sm px-2 font-sans text-xs"></div></div></div><div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre! language-text"><span><span># 直连（示例）
 vless://&lt;UUID&gt;@&lt;IP&gt;:&lt;PORT&gt;?encryption=none&amp;flow=xtls-rprx-vision&amp;security=reality&amp;sni=www.microsoft.com&amp;fp=chrome&amp;pbk=&lt;REALITY_PUB&gt;&amp;sid=&lt;SID&gt;&amp;type=tcp#vless-reality
-
 vmess://&lt;Base64(JSON)&gt;
 hy2://&lt;pwd_b64url&gt;@&lt;IP&gt;:&lt;PORT&gt;?insecure=1&amp;allowInsecure=1&amp;sni=&lt;REALITY_SERVER&gt;#hysteria2
 ss://&lt;base64(method:password)&gt;@&lt;IP&gt;:&lt;PORT&gt;#ss / #ss2022
