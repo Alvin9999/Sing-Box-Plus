@@ -352,7 +352,7 @@ install_singbox() {
 
   local repo="SagerNet/sing-box"
   local tag="${SINGBOX_TAG:-latest}"   # 可通过环境变量固定版本，比如 v1.12.7
-  local api url tmp arch asset_regex found= ""
+  local api url tmp arch asset_regex found=""
 
   arch="$(arch_map)"
 
