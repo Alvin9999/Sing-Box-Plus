@@ -57,15 +57,41 @@ info(){ echo -e "[${C_CYAN}信息${C_RESET}] $*"; }
 warn(){ echo -e "[${C_YELLOW}警告${C_RESET}] $*"; }
 die(){  echo -e "[${C_RED}错误${C_RESET}] $*" >&2; exit 1; }
 
-arch_map(){
-  local m; m=$(uname -m)
-  case "$m" in
-    x86_64|amd64) echo amd64;;
-    aarch64|arm64) echo arm64;;
-    armv7l|armv7) echo armv7;;
-    i386|i686) echo 386;;
-    *) echo amd64;;
+# --- 架构映射：uname -m -> 发行资产名 ---
+arch_map() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    armv7l|armv7) echo "armv7" ;;
+    armv6l)       echo "armv7" ;;   # 上游无 armv6，回退 armv7
+    i386|i686)    echo "386"  ;;
+    *)            echo "amd64" ;;
   esac
+}
+
+# --- 依赖安装：兼容 apt / yum / dnf / apk / pacman / zypper ---
+ensure_deps() {
+  local pkgs=("$@") miss=()
+  for p in "${pkgs[@]}"; do command -v "$p" >/dev/null 2>&1 || miss+=("$p"); done
+  ((${#miss[@]}==0)) && return 0
+
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y "${miss[@]}" || apt-get install -y --no-install-recommends "${miss[@]}"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "${miss[@]}"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "${miss[@]}"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "${miss[@]}"
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm "${miss[@]}"
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install "${miss[@]}"
+  else
+    err "无法自动安装依赖：${miss[*]}，请手动安装后重试"
+    return 1
+  fi
 }
 
 b64enc(){ base64 -w 0 2>/dev/null || base64; }
@@ -308,23 +334,104 @@ install_deps(){
   apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
 
-install_singbox(){
-  if [[ -x "$BIN_PATH" ]]; then
-    info "检测到 sing-box：$("$BIN_PATH" version 2>/dev/null | head -n1)"
+# --- 安装 sing-box（通用且带回退，不再 404） ---
+install_singbox() {
+  umask 022
+  : "${BIN_PATH:=/usr/local/bin/sing-box}"
+
+  # 已安装直接跳过
+  if command -v "$BIN_PATH" >/dev/null 2>&1; then
+    info "检测到 sing-box：$("$BIN_PATH" version | head -n1)"
     return 0
   fi
-  install_deps
-  local os=linux arch; arch=$(arch_map)
-  local url="https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-${os}-${arch}.tar.gz"
-  info "下载 sing-box ($arch) ..."
-  local tmp; tmp=$(mktemp -d)
-  curl -fsSL "$url" -o "$tmp/sb.tgz" || die "下载 sing-box 失败"
-  tar -xzf "$tmp/sb.tgz" -C "$tmp" || die "解压失败"
-  install -m0755 "$tmp/sing-box" "$BIN_PATH"
+
+  # 基础依赖
+  ensure_deps curl jq tar || return 1
+  # 某些资产会发 zip；装个 unzip（若没有）
+  command -v unzip >/dev/null 2>&1 || ensure_deps unzip
+
+  local repo="SagerNet/sing-box"
+  local tag="${SINGBOX_TAG:-latest}"   # 可通过环境变量固定版本，比如 v1.12.7
+  local api url tmp arch asset_regex found= ""
+
+  arch="$(arch_map)"
+
+  info "下载 sing-box (${arch}) ..."
+
+  # 1) 解析版本 tag
+  if [[ "$tag" == "latest" ]]; then
+    tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name' || true)"
+    # API 限流或失败时，用 302 跳转拿到真实 tag
+    if [[ -z "$tag" || "$tag" == "null" ]]; then
+      tag="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" \
+             | sed 's#^.*/tag/##' || true)"
+    fi
+  fi
+  [[ -n "$tag" && "$tag" != "null" ]] || { err "获取 sing-box 版本失败"; return 1; }
+
+  # 2) 在该 tag 里找匹配资产（优先 amd64，找不到再 amd64v3；其它架构直接单一匹配）
+  api="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+
+  if [[ "$arch" == "amd64" ]]; then
+    # 优先非 v3，防止老 CPU 无法运行；若没找到再尝试 v3
+    for pattern in "linux-amd64" "linux-amd64v3"; do
+      url="$(curl -fsSL "$api" 2>/dev/null \
+            | jq -r --arg pat "$pattern" \
+              '.assets[] | select(.name | test($pat + "(\\.tar\\.gz|\\.zip)$"))) | .browser_download_url' \
+            | head -n1)"
+      if [[ -n "$url" && "$url" != "null" ]]; then found=1; break; fi
+    done
+  else
+    url="$(curl -fsSL "$api" 2>/dev/null \
+          | jq -r --arg pat "linux-${arch}" \
+            '.assets[] | select(.name | test($pat + "(\\.tar\\.gz|\\.zip)$"))) | .browser_download_url' \
+          | head -n1)"
+    [[ -n "$url" && "$url" != "null" ]] && found=1 || true
+  fi
+
+  # 3) API 失败或未找到 → 回退到 HTML 抓取（尽量稳）
+  if [[ -z "$found" ]]; then
+    # 构造正则：amd64 试两个；其它一次
+    if [[ "$arch" == "amd64" ]]; then
+      for pattern in "linux-amd64" "linux-amd64v3"; do
+        url="$(curl -fsSL "https://github.com/${repo}/releases/expanded_assets/${tag}" 2>/dev/null \
+              | grep -Eo "/${repo}/releases/download/${tag}/sing-box-[^\"']*-${pattern}\.(tar\.gz|zip)" \
+              | head -n1 | sed "s#^#https://github.com#")"
+        [[ -n "$url" ]] && { found=1; break; }
+      done
+    else
+      url="$(curl -fsSL "https://github.com/${repo}/releases/expanded_assets/${tag}" 2>/dev/null \
+            | grep -Eo "/${repo}/releases/download/${tag}/sing-box-[^\"']*-linux-${arch}\.(tar\.gz|zip)" \
+            | head -n1 | sed "s#^#https://github.com#")"
+      [[ -n "$url" ]] && found=1 || true
+    fi
+  fi
+
+  [[ -n "$found" ]] || { err "下载 sing-box 失败（未找到 ${arch} 匹配资产）"; return 1; }
+
+  # 4) 下载并解包安装
+  tmp="$(mktemp -d)"
+  if ! curl -fL "$url" -o "$tmp/pkg"; then
+    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
+  fi
+
+  if file "$tmp/pkg" | grep -qi zip; then
+    unzip -q "$tmp/pkg" -d "$tmp"
+  else
+    tar -xzf "$tmp/pkg" -f "$tmp/pkg" -C "$tmp"
+  fi
+
+  # 发行包通常是 ./sing-box 或 ./sing-box*/sing-box
+  local bin
+  bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "安装包中未找到 sing-box 可执行文件"; return 1; }
+
+  install -m0755 "$bin" "$BIN_PATH"
   rm -rf "$tmp"
+
+  # 打印版本
   info "已安装：$("$BIN_PATH" version | head -n1)"
 }
-
 # ===== systemd =====
 write_systemd(){ cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
 [Unit]
