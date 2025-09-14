@@ -2,6 +2,7 @@
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
 #  Version: v2.1.6
+#  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
 #   - 保留稳定版的 18 节点实现逻辑与链接格式；
@@ -645,7 +646,7 @@ banner(){
   clear >/dev/null 2>&1 || true
   hr
   echo -e " ${C_CYAN}🚀 ${SCRIPT_NAME} ${SCRIPT_VERSION} 🚀${C_RESET}"
-  echo -e " ${C_CYAN}脚本更新地址:${C_RESET} https://github.com/Alvin9999/Sing-Box-Plus"
+  echo -e "${C_CYAN} 脚本更新地址: https://github.com/Alvin9999/Sing-Box-Plus${C_RESET}"
   hr
   echo -e "系统加速状态：$(bbr_state)"
   echo -e "Sing-Box 启动状态：$(sb_service_state)"
@@ -667,16 +668,25 @@ restart_service(){
 }
 
 rotate_ports(){
+  ensure_installed_or_hint || return 0
   load_ports || true
+  rand_ports_reset
+
+  # 清空 18 项端口变量，触发重新分配不重复端口
   PORT_VLESSR=""; PORT_VLESS_GRPCR=""; PORT_TROJANR=""; PORT_HY2=""; PORT_VMESS_WS=""
   PORT_HY2_OBFS=""; PORT_SS2022=""; PORT_SS=""; PORT_TUIC=""
   PORT_VLESSR_W=""; PORT_VLESS_GRPCR_W=""; PORT_TROJANR_W=""; PORT_HY2_W=""; PORT_VMESS_WS_W=""
   PORT_HY2_OBFS_W=""; PORT_SS2022_W=""; PORT_SS_W=""; PORT_TUIC_W=""
-  save_all_ports
-  write_config
-  restart_service
+
+  save_all_ports          # 重新生成并保存 18 个不重复端口
+  write_config            # 用新端口重写 /opt/sing-box/config.json
+  open_firewall           # ★ 新增：把“当前配置中的端口”全部放行
+  systemctl restart "${SYSTEMD_SERVICE}"
+
   info "已更换端口并重启。"
+  read -p "回车返回..." _ || true
 }
+
 
 uninstall_all(){
   systemctl stop "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
@@ -720,7 +730,7 @@ menu(){
     1) deploy_native ;;
     2) if ensure_installed_or_hint; then print_links_grouped; exit 0; fi ;;
     3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
-    4) if ensure_installed_or_hint; then rotate_ports; fi; read -rp "回车返回..." _ || true; menu ;;
+   4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
     5) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
     8) uninstall_all ;; # 直接退出
     0) exit 0 ;;
