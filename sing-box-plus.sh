@@ -294,37 +294,70 @@ install_wgcf(){
   install -m0755 "$tmp/wgcf" "$WGCF_BIN"
   rm -rf "$tmp"
 }
-ensure_warp_profile(){
-  [[ "$ENABLE_WARP" == "true" ]] || return 0
-  if load_warp 2>/dev/null; then return 0; fi
-  install_wgcf || { warn "wgcf 安装失败，自动禁用 WARP 节点"; ENABLE_WARP=false; save_env; return 0; }
-  local wd="$WGCF_DIR"; mkdir -p "$wd"
-  if [[ ! -f "$wd/wgcf-account.toml" ]]; then "$WGCF_BIN" register --accept-tos --config "$wd/wgcf-account.toml" >/dev/null; fi
-  "$WGCF_BIN" generate --config "$wd/wgcf-account.toml" --profile "$wd/wgcf-profile.conf" >/dev/null
-  local prof="$wd/wgcf-profile.conf"
 
-  WARP_PRIVATE_KEY=$(awk -F'= *' '/^PrivateKey/{gsub(/\r/,"");print $2}' "$prof")
-  WARP_PEER_PUBLIC_KEY=$(awk -F'= *' '/^PublicKey/{gsub(/\r/,"");print $2}' "$prof")
-  local ep; ep=$(awk -F'= *' '/^Endpoint/{gsub(/\r/,"");print $2;exit}' "$prof" | tr -d '"')
-  local host port
-  if [[ "$ep" =~ ^\[(.+)\]:(.+)$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"; else host="${ep%:*}"; port="${ep##*:}"; fi
-  # 预解析域名 → IP（DoH）
-  if [[ "$host" =~ [A-Za-z] ]]; then
-    local ip4; ip4=$(curl -fsSL -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=${host}&type=A" \
-              | jq -r '.Answer[]? | select(.type==1) | .data' | head -n1 2>/dev/null || true)
-    [[ -n "$ip4" ]] && host="$ip4"
+# —— Base64 清理 + 补齐：去掉引号/空白，长度 %4==2 补“==”，%4==3 补“=” ——
+pad_b64(){
+  local s="${1:-}"
+  # 去引号/空格/回车
+  s="$(printf '%s' "$s" | tr -d '\r\n\" ')"
+  # 去掉已有尾随 =，按需重加
+  s="${s%%=*}"
+  local rem=$(( ${#s} % 4 ))
+  if   (( rem == 2 )); then s="${s}=="
+  elif (( rem == 3 )); then s="${s}="
   fi
+  printf '%s' "$s"
+}
+
+
+# ===== WARP（wgcf）配置生成/修复 =====
+ensure_warp_profile(){
+  [[ "${ENABLE_WARP:-true}" == "true" ]] || return 0
+
+  # 先尝试读取旧 env，并做一次规范化补齐
+  if load_warp 2>/dev/null; then
+    WARP_PRIVATE_KEY="$(pad_b64 "${WARP_PRIVATE_KEY:-}")"
+    WARP_PEER_PUBLIC_KEY="$(pad_b64 "${WARP_PEER_PUBLIC_KEY:-}")"
+    # 允许之前没写 reserved，给默认 0
+    : "${WARP_RESERVED_1:=0}" "${WARP_RESERVED_2:=0}" "${WARP_RESERVED_3:=0}"
+    save_warp
+    # 如果关键字段都在，就直接用旧的（已经补齐），无需重建
+    if [[ -n "$WARP_PRIVATE_KEY" && -n "$WARP_PEER_PUBLIC_KEY" && -n "${WARP_ENDPOINT_HOST:-}" && -n "${WARP_ENDPOINT_PORT:-}" ]]; then
+      return 0
+    fi
+  fi
+
+  # 走到这里说明旧 env 不完整；开始用 wgcf 重建
+  install_wgcf || { warn "wgcf 安装失败，禁用 WARP 节点"; ENABLE_WARP=false; save_env; return 0; }
+
+  local wd="$SB_DIR/wgcf"; mkdir -p "$wd"
+  if [[ ! -f "$wd/wgcf-account.toml" ]]; then
+    "$WGCF_BIN" register --accept-tos --config "$wd/wgcf-account.toml" >/dev/null
+  fi
+  "$WGCF_BIN" generate --config "$wd/wgcf-account.toml" --profile "$wd/wgcf-profile.conf" >/dev/null
+
+  local prof="$wd/wgcf-profile.conf"
+  # 提取并规范化
+  WARP_PRIVATE_KEY="$(pad_b64 "$(awk -F'= *' '/^PrivateKey/{gsub(/\r/,"");print $2; exit}' "$prof")")"
+  WARP_PEER_PUBLIC_KEY="$(pad_b64 "$(awk -F'= *' '/^PublicKey/{gsub(/\r/,"");print $2; exit}' "$prof")")"
+
+  # Endpoint 可能是域名或 [IPv6]:port
+  local ep host port
+  ep="$(awk -F'= *' '/^Endpoint/{gsub(/\r/,"");print $2; exit}' "$prof" | tr -d '" ')"
+  if [[ "$ep" =~ ^\[(.+)\]:(.+)$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"; else host="${ep%:*}"; port="${ep##*:}"; fi
   WARP_ENDPOINT_HOST="$host"
   WARP_ENDPOINT_PORT="$port"
-  local ad; ad=$(awk -F'= *' '/^Address/{gsub(/\r/,"");print $2;exit}' "$prof" | tr -d '"')
+
+  # 内网地址与 reserved
+  local ad rs
+  ad="$(awk -F'= *' '/^Address/{gsub(/\r/,"");print $2; exit}' "$prof" | tr -d '" ')"
   WARP_ADDRESS_V4="${ad%%,*}"
-  WARP_ADDRESS_V6="${ad##*, }"
-  local rs; rs=$(awk -F'= *' '/^Reserved/{gsub(/\r/,"");print $2;exit}' "$prof" | tr -d '" ')
-  if [[ -n "$rs" && "$rs" == *","* ]]; then
-    WARP_RESERVED_1="${rs%%,*}"; rs="${rs#*,}"; WARP_RESERVED_2="${rs%%,*}"; WARP_RESERVED_3="${rs##*,}"
-  else
-    WARP_RESERVED_1=0; WARP_RESERVED_2=0; WARP_RESERVED_3=0
-  fi
+  WARP_ADDRESS_V6="${ad##*,}"
+  rs="$(awk -F'= *' '/^Reserved/{gsub(/\r/,"");print $2; exit}' "$prof" | tr -d '" ')"
+  WARP_RESERVED_1="${rs%%,*}"; rs="${rs#*,}"
+  WARP_RESERVED_2="${rs%%,*}"; WARP_RESERVED_3="${rs##*,}"
+  : "${WARP_RESERVED_1:=0}" "${WARP_RESERVED_2:=0}" "${WARP_RESERVED_3:=0}"
+
   save_warp
 }
 
@@ -334,104 +367,71 @@ install_deps(){
   apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
 
-# --- 安装 sing-box（通用且带回退，不再 404） ---
+# ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
-  umask 022
-  : "${BIN_PATH:=/usr/local/bin/sing-box}"
-
-  # 已安装直接跳过
+  # 已安装则直接返回
   if command -v "$BIN_PATH" >/dev/null 2>&1; then
-    info "检测到 sing-box：$("$BIN_PATH" version | head -n1)"
+    info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
     return 0
   fi
 
-  # 基础依赖
+  # 依赖
   ensure_deps curl jq tar || return 1
-  # 某些资产会发 zip；装个 unzip（若没有）
-  command -v unzip >/dev/null 2>&1 || ensure_deps unzip
+  command -v xz >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
+  command -v unzip >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
 
   local repo="SagerNet/sing-box"
-  local tag="${SINGBOX_TAG:-latest}"   # 可通过环境变量固定版本，比如 v1.12.7
-  local api url tmp arch asset_regex found=""
-
-  arch="$(arch_map)"
+  local tag="${SINGBOX_TAG:-latest}"   # 允许用环境变量固定版本，如 v1.12.7
+  local arch; arch="$(arch_map)"
+  local api url tmp pkg re rel_url
 
   info "下载 sing-box (${arch}) ..."
 
-  # 1) 解析版本 tag
-  if [[ "$tag" == "latest" ]]; then
-    tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | jq -r '.tag_name' || true)"
-    # API 限流或失败时，用 302 跳转拿到真实 tag
-    if [[ -z "$tag" || "$tag" == "null" ]]; then
-      tag="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" \
-             | sed 's#^.*/tag/##' || true)"
-    fi
-  fi
-  [[ -n "$tag" && "$tag" != "null" ]] || { err "获取 sing-box 版本失败"; return 1; }
-
-  # 2) 在该 tag 里找匹配资产（优先 amd64，找不到再 amd64v3；其它架构直接单一匹配）
-  api="https://api.github.com/repos/${repo}/releases/tags/${tag}"
-
-  if [[ "$arch" == "amd64" ]]; then
-    # 优先非 v3，防止老 CPU 无法运行；若没找到再尝试 v3
-    for pattern in "linux-amd64" "linux-amd64v3"; do
-      url="$(curl -fsSL "$api" 2>/dev/null \
-            | jq -r --arg pat "$pattern" \
-              '.assets[] | select(.name | test($pat + "(\\.tar\\.gz|\\.zip)$"))) | .browser_download_url' \
-            | head -n1)"
-      if [[ -n "$url" && "$url" != "null" ]]; then found=1; break; fi
-    done
+  # 取 release JSON
+  if [[ "$tag" = "latest" ]]; then
+    rel_url="https://api.github.com/repos/${repo}/releases/latest"
   else
-    url="$(curl -fsSL "$api" 2>/dev/null \
-          | jq -r --arg pat "linux-${arch}" \
-            '.assets[] | select(.name | test($pat + "(\\.tar\\.gz|\\.zip)$"))) | .browser_download_url' \
-          | head -n1)"
-    [[ -n "$url" && "$url" != "null" ]] && found=1 || true
+    rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
   fi
 
-  # 3) API 失败或未找到 → 回退到 HTML 抓取（尽量稳）
-  if [[ -z "$found" ]]; then
-    # 构造正则：amd64 试两个；其它一次
-    if [[ "$arch" == "amd64" ]]; then
-      for pattern in "linux-amd64" "linux-amd64v3"; do
-        url="$(curl -fsSL "https://github.com/${repo}/releases/expanded_assets/${tag}" 2>/dev/null \
-              | grep -Eo "/${repo}/releases/download/${tag}/sing-box-[^\"']*-${pattern}\.(tar\.gz|zip)" \
-              | head -n1 | sed "s#^#https://github.com#")"
-        [[ -n "$url" ]] && { found=1; break; }
-      done
-    else
-      url="$(curl -fsSL "https://github.com/${repo}/releases/expanded_assets/${tag}" 2>/dev/null \
-            | grep -Eo "/${repo}/releases/download/${tag}/sing-box-[^\"']*-linux-${arch}\.(tar\.gz|zip)" \
-            | head -n1 | sed "s#^#https://github.com#")"
-      [[ -n "$url" ]] && found=1 || true
-    fi
+  # 资产名匹配：兼容 tar.gz / tar.xz / zip
+  # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
+  re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
+
+  # 先在目标 release 里找；找不到再从所有 releases 里兜底
+  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
+  if [[ -z "$url" ]]; then
+    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
+           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
   fi
+  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
 
-  [[ -n "$found" ]] || { err "下载 sing-box 失败（未找到 ${arch} 匹配资产）"; return 1; }
-
-  # 4) 下载并解包安装
-  tmp="$(mktemp -d)"
-  if ! curl -fL "$url" -o "$tmp/pkg"; then
+  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
+  if ! curl -fL "$url" -o "$pkg"; then
     rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
   fi
 
-  if file "$tmp/pkg" | grep -qi zip; then
-    unzip -q "$tmp/pkg" -d "$tmp"
+  # 解压
+  if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
+    tar -xzf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.tar\.xz$'; then
+    tar -xJf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.zip$'; then
+    unzip -q "$pkg" -d "$tmp"
   else
-    tar -xzf "$tmp/pkg" -f "$tmp/pkg" -C "$tmp"
+    rm -rf "$tmp"; err "未知包格式：$url"; return 1
   fi
 
-  # 发行包通常是 ./sing-box 或 ./sing-box*/sing-box
+  # 找到二进制并安装
   local bin
   bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
-  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "安装包中未找到 sing-box 可执行文件"; return 1; }
+  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
 
-  install -m0755 "$bin" "$BIN_PATH"
+  install -m 0755 "$bin" "$BIN_PATH"
   rm -rf "$tmp"
-
-  # 打印版本
-  info "已安装：$("$BIN_PATH" version | head -n1)"
+  info "安装完成：$("$BIN_PATH" version | head -n1)"
 }
+
 # ===== systemd =====
 write_systemd(){ cat > "/etc/systemd/system/${SYSTEMD_SERVICE}" <<EOF
 [Unit]
