@@ -370,88 +370,58 @@ install_deps(){
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
-  # 目标安装位置（若外部没给 BIN_PATH 就用默认）
-  local BIN="${BIN_PATH:-/usr/local/bin/sing-box}"
-
-  # 已安装则直接返回（两种方式都判断）
-  if command -v sing-box >/dev/null 2>&1 || [[ -x "$BIN" ]]; then
-    BIN_PATH="$(command -v sing-box 2>/dev/null || printf %s "$BIN")"
-    info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
+  # 已装则跳过
+  if command -v sing-box >/dev/null 2>&1; then
+    info "检测到 sing-box: $(sing-box version | head -n1)"
+    BIN_PATH=$(command -v sing-box)
     return 0
   fi
 
-  # 依赖（尽量不跑 apt update：只在缺包时 install）
-  ensure_deps curl jq tar || return 1
-  command -v xz >/dev/null 2>&1   || ensure_deps xz-utils >/dev/null 2>&1 || true
-  command -v unzip >/dev/null 2>&1 || ensure_deps unzip    >/dev/null 2>&1 || true
+  ensure_deps  # 你的依赖检查/安装（有的话保留）
 
-  # 网络请求默认参数：强制 IPv4，避免 AAAA 回落；加超时，避免“卡住”
-  local CURL_OPTS="-fsSL -4 --connect-timeout ${CURL_CONNECT_TIMEOUT:-3} --max-time ${CURL_MAX_TIME:-20}"
+  # 统一的 curl 选项：强制 IPv4 + 合理超时
+  local CURL_OPTS=${CURL_OPTS:-"-fsSL -4 --connect-timeout 3 --max-time 15"}
 
-  local repo="SagerNet/sing-box"
-  local tag="${SINGBOX_TAG:-latest}"            # 可通过环境变量固定版本：SINGBOX_TAG=v1.12.8
-  local arch; arch="$(arch_map)"
-  local api="${GITHUB_API:-https://api.github.com}"
-  local url tmp pkg re rel_url
+  # 架构映射（保持你原来的逻辑）
+  local GOA
+  case "$(uname -m)" in
+    x86_64|amd64) GOA="amd64" ;;
+    aarch64|arm64) GOA="arm64" ;;
+    armv7l|armv7) GOA="armv7" ;;
+    i386|i686)    GOA="386" ;;
+    *) GOA="amd64" ;;
+  esac
 
-  # 先给“即时反馈”，用户不再“空等”
-  info "准备获取下载地址（解析/握手可能需要几秒）..."
+  # 先给“即时反馈”
+  info "准备获取下载地址（网络解析/握手可能需要几秒）..."
 
-  # 选择 release JSON
-  if [[ "$tag" = "latest" ]]; then
-    rel_url="$api/repos/${repo}/releases/latest"
-  else
-    rel_url="$api/repos/${repo}/releases/tags/${tag}"
-  fi
-
-  # 资产名匹配：兼容 tar.gz / tar.xz / zip
-  # 例：sing-box-1.12.8-linux-amd64.tar.gz
-  re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
-
-  # 优先从目标 release 拿直链；失败再从 releases 列表兜底
-  url="$(curl $CURL_OPTS "$rel_url" \
-        | jq -r --arg re "$re" '.assets[] | select(.name|test($re)) | .browser_download_url' \
+  # 先尝试从 API 拿最新版本的下载链接；若失败再走兜底
+  local api url
+  api="${GITHUB_API:-https://api.github.com}"
+  url="$(curl $CURL_OPTS "$api/repos/SagerNet/sing-box/releases/latest" \
+        | jq -r --arg pat "linux_${GOA}" '.assets[] | select(.name|test($pat + "(\\.tar\\.gz|\\.zip)$")) | .browser_download_url' \
         | head -n1 2>/dev/null || true)"
 
+  # 兜底：如果 API 挂了，按已知稳定版本拼接直链（你可改成自己想固化的版本号）
   if [[ -z "$url" ]]; then
-    url="$(curl $CURL_OPTS "https://api.github.com/repos/${repo}/releases" \
-          | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name|test($re)) | .browser_download_url ][0]' \
-          2>/dev/null || true)"
+    local ver="1.12.8"
+    url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${GOA}.tar.gz"
   fi
 
-  # 兜底直链（API 被限流/被墙时仍可用；版本可自定义）
-  if [[ -z "$url" ]]; then
-    local ver="${SINGBOX_FALLBACK_VER:-1.12.8}"
-    url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz"
-  fi
+  info "下载 sing-box (${GOA}) ..."
+  local tmp; tmp=$(mktemp -d)
+  curl $CURL_OPTS "$url" -o "$tmp/sing-box.tar.gz" || { err "下载失败"; rm -rf "$tmp"; return 1; }
 
-  info "下载 sing-box (${arch}) ..."
-  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
-  if ! curl $CURL_OPTS "$url" -o "$pkg"; then
-    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
-  fi
+  tar -xf "$tmp/sing-box.tar.gz" -C "$tmp" || { err "解压失败"; rm -rf "$tmp"; return 1; }
+  # 自动找可执行文件（不同版本包名略有变动，兼容处理）
+  local bin
+  bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  [[ -n "$bin" ]] || { err "未找到可执行文件"; rm -rf "$tmp"; return 1; }
 
-  # 解压（支持 .tar.gz / .tar.xz / .zip）
-  if [[ "$url" =~ \.tar\.gz$ || "$url" =~ \.tgz$ ]]; then
-    tar -xzf "$pkg" -C "$tmp"
-  elif [[ "$url" =~ \.tar\.xz$ ]]; then
-    tar -xJf "$pkg" -C "$tmp"
-  elif [[ "$url" =~ \.zip$ ]]; then
-    unzip -q "$pkg" -d "$tmp"
-  else
-    rm -rf "$tmp"; err "未知包格式：$url"; return 1
-  fi
-
-  # 找到二进制并安装（不同版本包名子目录不同，用 find 更稳）
-  local bin_path
-  bin_path="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
-  [[ -n "$bin_path" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
-
-  install -m 0755 "$bin_path" "$BIN"
-  BIN_PATH="$BIN"
-
+  install -m 0755 "$bin" /usr/local/bin/sing-box
   rm -rf "$tmp"
-  info "安装完成：$("$BIN_PATH" version | head -n1)"
+  BIN_PATH="/usr/local/bin/sing-box"
+  info "安装完成：$(sing-box version | head -n1)"
 }
 
 
