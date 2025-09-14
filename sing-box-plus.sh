@@ -370,9 +370,7 @@ install_deps(){
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
-  # —— 额外：无论是否已安装，都给个状态提示 —— 
-  info "正在检查 sing-box 安装状态..."
-  
+
   # 已安装则直接返回
   if command -v "$BIN_PATH" >/dev/null 2>&1; then
     info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
@@ -397,7 +395,6 @@ install_singbox() {
   else
     rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
   fi
-  info "准备获取下载地址..."
 
   # 资产名匹配：兼容 tar.gz / tar.xz / zip
   # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
@@ -411,7 +408,6 @@ install_singbox() {
   fi
   [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
 
-  info "下载 sing-box 中..."
 
   tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
   if ! curl -fL "$url" -o "$pkg"; then
