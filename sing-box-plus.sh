@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.6
+#  Version: v2.1.7
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -14,6 +14,44 @@
 # ============================================================
 
 set -Eeuo pipefail
+# ===== [BEGIN] 依赖预装块（可移植） =====
+[ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
+
+detect_pm() {
+  if command -v apt-get >/dev/null 2>&1; then PM=apt
+  elif command -v dnf >/dev/null 2>&1; then PM=dnf
+  elif command -v yum >/dev/null 2>&1; then PM=yum
+  elif command -v pacman >/dev/null 2>&1; then PM=pacman
+  elif command -v zypper >/dev/null 2>&1; then PM=zypper
+  else echo "不支持的系统/包管理器"; exit 1; fi
+}
+pkg_install() {
+  case "$PM" in
+    apt)   apt-get update -y; for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done ;;
+    dnf)   for p in "$@"; do dnf install -y "$p" || true; done ;;
+    yum)   yum install -y epel-release || true; for p in "$@"; do yum install -y "$p" || true; done ;;
+    pacman) pacman -Sy --noconfirm; for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done ;;
+    zypper) zypper -n ref || true; for p in "$@"; do zypper --non-interactive install "$p" || true; done ;;
+  esac
+}
+install_prereqs() {
+  detect_pm
+  case "$PM" in
+    apt)    pkg_install ca-certificates curl jq tar xz-utils unzip openssl uuid-runtime iproute2 iptables; pkg_install ufw ;;
+    dnf|yum) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute iptables iptables-nft; pkg_install firewalld ;;
+    pacman) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables ;;
+    zypper) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables; pkg_install firewalld ;;
+  esac
+}
+check_bins() {
+  need=(curl jq tar unzip openssl)
+  miss=(); for b in "${need[@]}"; do command -v "$b" >/dev/null 2>&1 || miss+=("$b"); done
+  if [ "${#miss[@]}" -gt 0 ]; then echo "[ERROR] 关键依赖缺失: ${miss[*]}"; exit 1; fi
+}
+
+install_prereqs
+check_bins
+# ===== [END] 依赖预装块 =====
 
 # ===== 提前设默认，避免 set -u 早期引用未定义变量导致脚本直接退出 =====
 SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
@@ -38,7 +76,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.1.6"
+SCRIPT_VERSION="v2.1.7"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
