@@ -75,7 +75,7 @@ pm_install() {
 install_prereqs() {
   # —— 短路：有哨兵且核心命令齐全时，直接跳过安装 ——
   if [ "$SBP_FORCE_DEPS" != 1 ] && already_has_core && [ -f "$SBP_DEPS_SENTINEL" ]; then
-    echo "[INFO] 依赖已就绪（检测到 $SBP_DEPS_SENTINEL），跳过安装"
+    echo "[INFO] 依赖已安装"
     return 0
   fi
 
@@ -129,6 +129,8 @@ check_bins
 mark_deps_ok
 # ===== [END] v2.1.8 依赖预装块（带缓存哨兵） =====
 
+# 防止 set -u 下未赋值数组报错
+declare -a PORTS=()
 
 # ===== 提前设默认，避免 set -u 早期引用未定义变量导致脚本直接退出 =====
 SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
