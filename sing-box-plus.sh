@@ -75,7 +75,7 @@ pm_install() {
 install_prereqs() {
   # —— 短路：有哨兵且核心命令齐全时，直接跳过安装 ——
   if [ "$SBP_FORCE_DEPS" != 1 ] && already_has_core && [ -f "$SBP_DEPS_SENTINEL" ]; then
-    echo "[INFO] 依赖已就绪（检测到 $SBP_DEPS_SENTINEL），跳过安装"
+    echo "[INFO] 依赖已安装"
     return 0
   fi
 
