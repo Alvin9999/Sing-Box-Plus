@@ -371,10 +371,46 @@ ensure_warp_profile(){
 }
 
 # ===== 依赖与安装 =====
-install_deps(){
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
+detect_pm() {
+  if command -v apt-get >/dev/null 2>&1; then PM=apt
+  elif command -v dnf >/dev/null 2>&1; then PM=dnf
+  elif command -v yum >/dev/null 2>&1; then PM=yum
+  elif command -v pacman >/dev/null 2>&1; then PM=pacman
+  elif command -v zypper >/dev/null 2>&1; then PM=zypper
+  else echo "不支持的系统/包管理器"; exit 1; fi
 }
+
+pkg_install() {
+  case "$PM" in
+    apt)    apt-get update -y && apt-get install -y --no-install-recommends "$@" ;;
+    dnf)    dnf install -y "$@" ;;
+    yum)    yum install -y "$@" ;;
+    pacman) pacman -Sy --noconfirm --needed "$@" ;;
+    zypper) zypper --non-interactive install "$@" ;;
+  esac
+}
+
+install_prereqs() {
+  detect_pm
+  case "$PM" in
+    apt)
+      pkg_install ca-certificates curl jq tar xz-utils unzip openssl uuid-runtime iproute2 iptables || true
+      pkg_install ufw || true
+      ;;
+    dnf|yum)
+      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute iptables iptables-nft || true
+      pkg_install firewalld || true
+      ;;
+    pacman)
+      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables || true
+      ;;
+    zypper)
+      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables || true
+      pkg_install firewalld || true
+      ;;
+  esac
+}
+
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
