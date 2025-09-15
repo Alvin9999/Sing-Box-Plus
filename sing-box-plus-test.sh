@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.2.1
+#  Version: v2.1.6
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -38,7 +38,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.2.1"
+SCRIPT_VERSION="v2.1.6"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -52,83 +52,6 @@ C_RESET="\033[0m"; C_BOLD="\033[1m"; C_DIM="\033[2m"
 C_RED="\033[31m";  C_GREEN="\033[32m"; C_YELLOW="\033[33m"
 C_BLUE="\033[34m"; C_CYAN="\033[36m"; C_MAGENTA="\033[35m"
 hr(){ printf "${C_DIM}=============================================================${C_RESET}\n"; }
-
-# ===== 包管理器探测 =====
-detect_pm(){
-  if command -v apt-get >/dev/null 2>&1; then echo apt; return; fi
-  if command -v dnf     >/dev/null 2>&1; then echo dnf; return; fi
-  if command -v yum     >/dev/null 2>&1; then echo yum; return; fi
-  if command -v apk     >/dev/null 2>&1; then echo apk; return; fi
-  if command -v zypper  >/dev/null 2>&1; then echo zypper; return; fi
-  if command -v pacman  >/dev/null 2>&1; then echo pacman; return; fi
-  echo none
-}
-
-# ===== 通用安装封装 =====
-pm_install(){
-  local pkgs=("$@") pm; pm="$(detect_pm)"
-  case "$pm" in
-    apt)
-      apt-get update -y >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}"
-      ;;
-    yum)
-      yum install -y epel-release >/dev/null 2>&1 || true
-      yum install -y "${pkgs[@]}"
-      ;;
-    dnf)
-      dnf install -y epel-release >/dev/null 2>&1 || true
-      dnf install -y "${pkgs[@]}"
-      ;;
-    apk)    apk add --no-cache "${pkgs[@]}" ;;
-    zypper) zypper --non-interactive in "${pkgs[@]}" ;;
-    pacman) pacman -Sy --noconfirm "${pkgs[@]}" ;;
-    *) return 1 ;;
-  esac
-}
-
-# ===== jq 的兜底（下载静态二进制）=====
-install_jq_fallback(){
-  local tmp url="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64"
-  tmp="$(mktemp -d)" || return 1
-  curl -fsSL "$url" -o "$tmp/jq" || { rm -rf "$tmp"; return 1; }
-  install -m0755 "$tmp/jq" /usr/local/bin/jq
-  rm -rf "$tmp"
-}
-
-# ===== 依赖就绪（一次性）=====
-ensure_base_deps(){
-  # 必需
-  local need=(curl wget jq tar unzip openssl)
-  # 根据平台补齐
-  if ! command -v xz >/dev/null 2>&1; then
-    case "$(detect_pm)" in
-      apt)   need+=(xz-utils) ;;
-      *)     need+=(xz) ;;
-    esac
-  fi
-  # ss / column / uuidgen 属于下面包
-  case "$(detect_pm)" in
-    apt)   need+=(iproute2 util-linux coreutils ca-certificates) ;;
-    yum|dnf)
-           need+=(iproute util-linux-core coreutils ca-certificates) ;;
-    apk)   need+=(iproute2 util-linux coreutils ca-certificates) ;;
-    zypper|pacman)
-           need+=(iproute2 util-linux coreutils ca-certificates) ;;
-  esac
-
-  # 安装
-  pm_install "${need[@]}" >/dev/null 2>&1 || true
-
-  # jq 兜底
-  command -v jq >/dev/null 2>&1 || install_jq_fallback || {
-    echo "[错误] 无法安装 jq"; return 1;
-  }
-
-  # 提示：防火墙工具可选（脚本已有 nft/iptables 兜底或跳过）
-  # 如要强制装：取消下一行注释
-  # pm_install ufw firewalld nftables iptables netfilter-persistent >/dev/null 2>&1 || true
-}
 
 # ===== 基础工具 =====
 info(){ echo -e "[${C_CYAN}信息${C_RESET}] $*"; }
@@ -802,7 +725,6 @@ deploy_native(){
 }
 
 ensure_installed_or_hint(){
-ensure_base_deps || return 1
   if [[ ! -f "$CONF_JSON" ]]; then
     warn "尚未安装，请先选择 1) 安装/部署（18 节点）"
     return 1
