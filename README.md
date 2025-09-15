@@ -38,25 +38,7 @@
 
 ## ✅ 支持系统
 
-**Debian 系列**
-
-* Debian 10 (buster)
-* Debian 11 (bullseye)
-* Debian 12 (bookworm)
-* Debian 13 (trixie)
-
-**Ubuntu 系列**
-
-* Ubuntu 20.04 LTS (focal)
-* Ubuntu 22.04 LTS (jammy)
-* Ubuntu 24.04 LTS (noble)
-* Ubuntu 25.04 (plucky)
-
-**RHEL 家族（验证较少，建议新手优先使用 Debian/Ubuntu）**
-
-* CentOS 7/8、Rocky、AlmaLinux 等
-
-> 其余发行版理论上可用，但依赖安装与 systemd 行为可能不同，请自行评估。
+支持 Debian/Ubuntu/CentOS/Arch Linux/Fedora/Rocky/openSUSE Linux 系统，已在[Vultr](https://www.vultr.com/?ref=7048874) 上测试通过。
 
 ---
 
