@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.2.0
+#  Version: v2.1.6
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -38,7 +38,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.2.0"
+SCRIPT_VERSION="v2.1.6"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -371,46 +371,10 @@ ensure_warp_profile(){
 }
 
 # ===== 依赖与安装 =====
-detect_pm() {
-  if command -v apt-get >/dev/null 2>&1; then PM=apt
-  elif command -v dnf >/dev/null 2>&1; then PM=dnf
-  elif command -v yum >/dev/null 2>&1; then PM=yum
-  elif command -v pacman >/dev/null 2>&1; then PM=pacman
-  elif command -v zypper >/dev/null 2>&1; then PM=zypper
-  else echo "不支持的系统/包管理器"; exit 1; fi
+install_deps(){
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
-
-pkg_install() {
-  case "$PM" in
-    apt)    apt-get update -y && apt-get install -y --no-install-recommends "$@" ;;
-    dnf)    dnf install -y "$@" ;;
-    yum)    yum install -y "$@" ;;
-    pacman) pacman -Sy --noconfirm --needed "$@" ;;
-    zypper) zypper --non-interactive install "$@" ;;
-  esac
-}
-
-install_prereqs() {
-  detect_pm
-  case "$PM" in
-    apt)
-      pkg_install ca-certificates curl jq tar xz-utils unzip openssl uuid-runtime iproute2 iptables || true
-      pkg_install ufw || true
-      ;;
-    dnf|yum)
-      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute iptables iptables-nft || true
-      pkg_install firewalld || true
-      ;;
-    pacman)
-      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables || true
-      ;;
-    zypper)
-      pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables || true
-      pkg_install firewalld || true
-      ;;
-  esac
-}
-
 
 # ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
