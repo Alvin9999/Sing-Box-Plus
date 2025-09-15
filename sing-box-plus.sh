@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.7
+#  Version: v2.1.8
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -14,44 +14,121 @@
 # ============================================================
 
 set -Eeuo pipefail
-# ===== [BEGIN] 依赖预装块（可移植） =====
+# ===== [BEGIN] v2.1.8 依赖预装块（带缓存哨兵） =====
+# 模式：SBP_SOFT=1 为宽松模式（缺核心仅警告不退出）；默认严格模式
+: "${SBP_SOFT:=0}"
+# 依赖就绪的哨兵文件（可自定义路径）
+: "${SBP_DEPS_SENTINEL:=/var/lib/sing-box-plus/.deps_ok}"
+# 强制重新安装依赖：SBP_FORCE_DEPS=1
+: "${SBP_FORCE_DEPS:=0}"
+
+# 需要 root
 [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
+# 是否已有全部核心命令
+already_has_core() {
+  local b
+  for b in curl jq tar unzip openssl; do
+    command -v "$b" >/dev/null 2>&1 || return 1
+  done
+  return 0
+}
+
+# 包管理器检测/刷新/安装（逐包安装，单个失败不影响其它）
 detect_pm() {
   if command -v apt-get >/dev/null 2>&1; then PM=apt
-  elif command -v dnf >/dev/null 2>&1; then PM=dnf
-  elif command -v yum >/dev/null 2>&1; then PM=yum
-  elif command -v pacman >/dev/null 2>&1; then PM=pacman
-  elif command -v zypper >/dev/null 2>&1; then PM=zypper
+  elif command -v dnf      >/dev/null 2>&1; then PM=dnf
+  elif command -v yum      >/dev/null 2>&1; then PM=yum
+  elif command -v pacman   >/dev/null 2>&1; then PM=pacman
+  elif command -v zypper   >/dev/null 2>&1; then PM=zypper
   else echo "不支持的系统/包管理器"; exit 1; fi
 }
-pkg_install() {
+pm_refresh() {
   case "$PM" in
-    apt)   apt-get update -y; for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done ;;
-    dnf)   for p in "$@"; do dnf install -y "$p" || true; done ;;
-    yum)   yum install -y epel-release || true; for p in "$@"; do yum install -y "$p" || true; done ;;
-    pacman) pacman -Sy --noconfirm; for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done ;;
-    zypper) zypper -n ref || true; for p in "$@"; do zypper --non-interactive install "$p" || true; done ;;
+    apt)    apt-get update -y || [ "$SBP_SOFT" = 1 ] ;;
+    pacman) pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ] ;;
+    zypper) zypper -n ref || true ;;
+    dnf|yum) : ;;
   esac
 }
+pm_install() {
+  case "$PM" in
+    apt)
+      for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done
+      ;;
+    dnf)
+      for p in "$@"; do dnf install -y "$p" || true; done
+      ;;
+    yum)
+      yum install -y epel-release || true   # EL7/老环境：jq 通常在 EPEL
+      for p in "$@"; do yum install -y "$p" || true; done
+      ;;
+    pacman)
+      for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done
+      ;;
+    zypper)
+      for p in "$@"; do zypper --non-interactive install "$p" || true; done
+      ;;
+  esac
+}
+
 install_prereqs() {
+  # —— 短路：有哨兵且核心命令齐全时，直接跳过安装 ——
+  if [ "$SBP_FORCE_DEPS" != 1 ] && already_has_core && [ -f "$SBP_DEPS_SENTINEL" ]; then
+    echo "[INFO] 依赖已就绪（检测到 $SBP_DEPS_SENTINEL），跳过安装"
+    return 0
+  fi
+
   detect_pm
+  pm_refresh
+
   case "$PM" in
-    apt)    pkg_install ca-certificates curl jq tar xz-utils unzip openssl uuid-runtime iproute2 iptables; pkg_install ufw ;;
-    dnf|yum) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute iptables iptables-nft; pkg_install firewalld ;;
-    pacman) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables ;;
-    zypper) pkg_install ca-certificates curl jq tar xz unzip openssl util-linux iproute2 iptables; pkg_install firewalld ;;
+    apt)
+      CORE=(curl jq tar unzip openssl)
+      EXTRA=(ca-certificates xz-utils uuid-runtime iproute2 iptables ufw)
+      ;;
+    dnf|yum)
+      CORE=(curl jq tar unzip openssl)
+      EXTRA=(ca-certificates xz util-linux iproute iptables iptables-nft firewalld)
+      ;;
+    pacman)
+      CORE=(curl jq tar unzip openssl)
+      EXTRA=(ca-certificates xz util-linux iproute2 iptables)
+      ;;
+    zypper)
+      CORE=(curl jq tar unzip openssl)
+      EXTRA=(ca-certificates xz util-linux iproute2 iptables firewalld)
+      ;;
   esac
+
+  pm_install "${CORE[@]}" "${EXTRA[@]}"
 }
+
+# 核心依赖自检（宽松模式仅警告，严格模式退出）
 check_bins() {
-  need=(curl jq tar unzip openssl)
-  miss=(); for b in "${need[@]}"; do command -v "$b" >/dev/null 2>&1 || miss+=("$b"); done
-  if [ "${#miss[@]}" -gt 0 ]; then echo "[ERROR] 关键依赖缺失: ${miss[*]}"; exit 1; fi
+  local need=(curl jq tar unzip openssl) miss=()
+  for b in "${need[@]}"; do command -v "$b" >/dev/null 2>&1 || miss+=("$b"); done
+  if [ "${#miss[@]}" -gt 0 ]; then
+    if [ "$SBP_SOFT" = 1 ]; then
+      echo "[WARN] 关键依赖未就绪：${miss[*]} —— 将尝试继续运行"
+    else
+      echo "[ERROR] 关键依赖未就绪：${miss[*]}"; exit 1
+    fi
+  fi
+}
+
+# 成功后打哨兵标记（仅当核心命令齐全）
+mark_deps_ok() {
+  if already_has_core; then
+    mkdir -p "$(dirname "$SBP_DEPS_SENTINEL")" && touch "$SBP_DEPS_SENTINEL" || true
+  fi
 }
 
 install_prereqs
 check_bins
-# ===== [END] 依赖预装块 =====
+mark_deps_ok
+# ===== [END] v2.1.8 依赖预装块（带缓存哨兵） =====
+
 
 # ===== 提前设默认，避免 set -u 早期引用未定义变量导致脚本直接退出 =====
 SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
@@ -76,7 +153,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.1.7"
+SCRIPT_VERSION="v2.1.8"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
