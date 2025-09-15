@@ -772,6 +772,8 @@ banner(){
   hr
   echo -e " ${C_CYAN}🚀 ${SCRIPT_NAME} ${SCRIPT_VERSION} 🚀${C_RESET}"
   echo -e "${C_CYAN} 脚本更新地址: https://github.com/Alvin9999/Sing-Box-Plus${C_RESET}"
+  echo "最低要求：Debian 11+ / Ubuntu 20.04+ / RHEL 家族 9+（CentOS Stream/Rocky/Alma）/ Fedora 38+ / Arch(rolling) / openSUSE Leap 15.4+"
+
   hr
   echo -e "系统加速状态：$(bbr_state)"
   echo -e "Sing-Box 启动状态：$(sb_service_state)"
