@@ -224,4 +224,6 @@ systemctl daemon-reload
 * 修改证书（自签 → 正式证书）
   将你的 `fullchain.pem` / `key.pem` 放到 `/opt/sing-box/cert/` 并保持文件名一致，然后重启。
 
+***
 
+有问题可以[发帖](https://github.com/Alvin9999/Sing-Box-Plus/issues)反馈，或者发邮件到海外邮箱rebeccalane27@gmail.com进行反馈。
