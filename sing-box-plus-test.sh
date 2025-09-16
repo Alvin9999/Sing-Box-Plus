@@ -45,11 +45,51 @@ detect_pm() {
   elif command -v zypper   >/dev/null 2>&1; then PM=zypper
   else echo "不支持的系统/包管理器"; exit 1; fi
 }
+# 允许 apt 接受发行信息变化（stable→oldstable / Version 变化）
+apt_allow_release_change() {
+  cat >/etc/apt/apt.conf.d/99allow-releaseinfo-change <<'EOF'
+Acquire::AllowReleaseInfoChange::Suite "true";
+Acquire::AllowReleaseInfoChange::Version "true";
+EOF
+}
+
+# 仅在 Debian10 且 SBP_ALLOW_OLD=1 时使用：切到 archive 源
+fix_buster_sources() {
+  cp -a /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%s) 2>/dev/null || true
+  cat >/etc/apt/sources.list <<'EOF'
+deb http://archive.debian.org/debian buster main contrib non-free
+deb http://archive.debian.org/debian buster-updates main contrib non-free
+deb http://archive.debian.org/debian-security buster/updates main contrib non-free
+EOF
+  echo 'Acquire::Check-Valid-Until "false";' >/etc/apt/apt.conf.d/99archive
+}
 pm_refresh() {
   case "$PM" in
-    apt)    apt-get update -y || [ "$SBP_SOFT" = 1 ] ;;
-    pacman) pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ] ;;
-    zypper) zypper -n ref || true ;;
+    apt)
+      # 允许发行信息改变（bullseye 由 stable→oldstable）
+      apt_allow_release_change
+      # 统一用 https
+      sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
+
+      # 先尝试更新
+      if ! apt-get update -y; then
+        # Debian10 兼容：仅在你设置 SBP_ALLOW_OLD=1 时启用归档源
+        if . /etc/os-release 2>/dev/null; then
+          if [ "${ID:-}" = "debian" ] && [ "${VERSION_ID%%.*}" -le 10 ] && [ "${SBP_ALLOW_OLD:-0}" = 1 ]; then
+            echo "[INFO] Debian 10 检测到，自动切换到 archive 源"
+            fix_buster_sources
+          fi
+        fi
+        # backports 镜像异常时临时注释并重试
+        if grep -Eq '^[[:space:]]*deb .* bullseye-backports' /etc/apt/sources.list; then
+          sed -i 's#^\([[:space:]]*deb .* bullseye-backports.*\)#\# \1#' /etc/apt/sources.list
+        fi
+        # 放宽 Valid-Until（归档/镜像滞后常见）
+        apt-get update -y -o Acquire::Check-Valid-Until=false || [ "${SBP_SOFT:-0}" = 1 ]
+      fi
+      ;;
+    pacman)  pacman -Sy --noconfirm || [ "${SBP_SOFT:-0}" = 1 ] ;;
+    zypper)  zypper -n ref || true ;;
     dnf|yum) : ;;
   esac
 }
