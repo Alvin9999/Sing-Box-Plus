@@ -1011,9 +1011,9 @@ menu(){
   systemctl restart "${SYSTEMD_SERVICE}" || true
   set -e                                            # ← 恢复严格模式
   print_links_grouped
-  read -rp "回车返回..." _ || true
-  menu
+  exit 0                                          # ← 打印后直接退出
   ;;
+    
     2) if ensure_installed_or_hint; then print_links_grouped; exit 0; fi ;;
     3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
    4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
