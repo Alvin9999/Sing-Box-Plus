@@ -144,16 +144,47 @@ detect_goarch() {
     *)            echo amd64 ;;
   esac
 }
-ensure_jq_static() {
-  command -v jq >/dev/null 2>&1 && return 0
-  local arch out="$SBP_BIN_DIR/jq" url alt
-  arch="$(detect_goarch)"
-  url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}"
-  alt="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64"
-  dl "$url" "$out" || { [ "$arch" = amd64 ] && dl "$alt" "$out" || true; }
-  chmod +x "$out" 2>/dev/null || true
-  command -v jq >/dev/null 2>&1
+# ===== jq（静态版）优先，二进制模式下绝不调包管理器 =====
+_dl_jq_static() {
+  # 只负责下载 jq 到指定位置
+  local dest="$1" fn arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) fn="jq-linux64" ;;
+    aarch64|arm64) fn="jq-linux64" ;;   # jq 只有 linux64 静态版，arm64 也可用
+    *) fn="jq-linux64" ;;
+  esac
+  # 两个源轮询（都走 IPv4 + 短超时）
+  with_retry 3 curl "${CURLX[@]}" -fsSL \
+    "https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
+  || with_retry 3 curl "${CURLX[@]}" -fsSL \
+    "https://ghproxy.com/https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
+  || return 1
+  chmod +x "$dest"
 }
+
+ensure_jq_static() {
+  # 已经有 jq 直接过
+  if command -v jq >/dev/null 2>&1; then return 0; fi
+
+  mkdir -p "$SBP_BIN_DIR"
+
+  # 二进制模式 或 跳过依赖检查：只下载静态 jq，不调包管理器
+  if [ "${SBP_BIN_ONLY:-0}" = "1" ] || [ "${SBP_SKIP_DEPS:-0}" = "1" ]; then
+    if _dl_jq_static "$SBP_BIN_DIR/jq"; then
+      export PATH="$SBP_BIN_DIR:$PATH"
+      return 0
+    fi
+    echo "[ERROR] 下载 jq 失败"; return 1
+  fi
+
+  # 正常模式：包管理器优先，失败再静态下载
+  if pkg_install jq; then
+    return 0
+  fi
+  _dl_jq_static "$SBP_BIN_DIR/jq" && export PATH="$SBP_BIN_DIR:$PATH"
+}
+
 
 # 工具：核心命令自检
 sbp_core_ok() {
