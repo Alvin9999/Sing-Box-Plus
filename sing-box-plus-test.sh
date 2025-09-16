@@ -13,6 +13,8 @@ stty erase ^H 2>/dev/null || true
 
 # ===== [BEGIN] SBP 引导模块（管理器优先 + 二进制回退）=====
 
+: "${SBP_BIN_VER:=v1.12.8}"
+: "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
 : "${SBP_SOFT:=0}"                     # 1=宽松模式（失败尽量继续），默认 0=严格
 : "${SBP_BIN_ONLY:=1}"                 # 1=默认二进制模式，不用包管理器
 : "${SBP_SKIP_DEPS:=${SBP_BIN_ONLY}}"  # 默认随二进制模式一起跳过依赖检查
@@ -54,6 +56,15 @@ net_apply_ip_mode() {
   fi
 }
 
+map_singbox_asset() {  # 输入 goarch，输出你仓库里的文件名
+  case "$1" in
+    amd64) echo "sing-box-amd64" ;;
+    arm64) echo "sing-box-arm64" ;;
+    armv7) echo "sing-box-armv7" ;;
+    386)   echo "sing-box-386" ;;        # 老旧 glibc 可自行切换为 sing-box-386-softfloat
+    *)     return 1 ;;
+  esac
+}
 
 # 工具：下载器 + 轻量重试
 dl() {  # 用法：dl <URL> <OUT_PATH>
@@ -279,87 +290,49 @@ pick_mirror_asset() {
   esac
 }
 
-# —— 二进制模式：直接获取 sing-box 可执行文件 —— #
 # —— 二进制模式：优先镜像，失败再回退官方 —— #
 install_singbox_binary() {
-  local goarch tmp asset url pkg fn json
+  local goa fn url tmp
 
-  goarch="$(detect_goarch)"
+  goa="$(detect_goarch)" || { echo "[ERROR] 无法识别架构"; return 1; }
+  fn="$(map_singbox_asset "$goa")"  || { echo "[ERROR] 不支持架构: $goa"; return 1; }
+
   tmp="$(mktemp -d)" || return 1
-  pkg="$tmp/pkg"
 
-  # 1) 先试 Release 直链（无需 jq，速度快）
-  if [ -n "${SBP_BIN_MIRROR:-}" ]; then
-    asset="$(pick_mirror_asset "$goarch")"
-    if [ -n "$asset" ]; then
-      url="${SBP_BIN_MIRROR}/${SBP_BIN_TAG}/${asset}"
-      if with_retry 3 dl "$url" "$pkg"; then
-        install -m0755 "$pkg" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
-        rm -rf "$tmp"
-        echo "[OK] 已从镜像安装 sing-box → $SBP_BIN_DIR/sing-box"
-        return 0
-      else
-        echo "[WARN] 镜像直链下载失败，回退官方 release。"
-      fi
-    else
-      echo "[WARN] 未识别到镜像资产（arch=$goarch），回退官方 release。"
+  # 1) 先走你的镜像（不需要 jq / 包管理器）
+  url="$SBP_BIN_MIRROR/$SBP_BIN_VER/$fn"
+  if with_retry 2 dl "$url" "$tmp/sing-box"; then
+    :
+  else
+    echo "[WARN] 镜像获取失败，尝试官方 Release 直连（无需 jq）"
+
+    # 2) 官方回退：下载 tar.gz 解出可执行文件，同样不需要 jq
+    #    官方命名：sing-box-1.12.8-linux-amd64.tar.gz 等
+    local ver_nov="${SBP_BIN_VER#v}" osarch
+    case "$goa" in
+      amd64) osarch="linux-amd64" ;;
+      arm64) osarch="linux-arm64" ;;
+      armv7) osarch="linux-armv7" ;;
+      386)   osarch="linux-386"   ;;
+      *)     rm -rf "$tmp"; echo "[ERROR] 不支持架构: $goa"; return 1 ;;
+    esac
+
+    local tgz="https://github.com/SagerNet/sing-box/releases/download/v${ver_nov}/sing-box-${ver_nov}-${osarch}.tar.gz"
+    if ! with_retry 2 dl "$tgz" "$tmp/sb.tgz"; then
+      rm -rf "$tmp"; echo "[ERROR] 无法下载 sing-box 二进制"; return 1
     fi
+
+    # 解包（需要 tar；CentOS/Ubuntu/Arch 都有，极简系统再考虑 busybox）
+    mkdir -p "$tmp/unpack"
+    tar -xzf "$tmp/sb.tgz" -C "$tmp/unpack" || { rm -rf "$tmp"; echo "[ERROR] 解包失败"; return 1; }
+
+    local bin
+    bin="$(find "$tmp/unpack" -type f -name 'sing-box' | head -n1)"
+    [ -n "$bin" ] || { rm -rf "$tmp"; echo "[ERROR] 包内未找到 sing-box"; return 1; }
+    cp -f "$bin" "$tmp/sing-box"
   fi
 
-  # 2) 回落到官方 SagerNet/sing-box 的 release 解析（需要 jq）
-  ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
-
-  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 20 \
-         https://api.github.com/repos/SagerNet/sing-box/releases/latest)" \
-       || { rm -rf "$tmp"; return 1; }
-
-  # 挑匹配架构的 tar 包（tar.gz / tar.xz / zip）
-  url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
-    .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
-  ' | head -n1)"
-
-  if [ -z "$url" ] || [ "$url" = "null" ]; then
-    echo "[ERROR] 未找到匹配架构($goarch)的 sing-box 资产"; rm -rf "$tmp"; return 1
-  fi
-
-  # 下载包
-  with_retry 3 dl "$url" "$pkg" || { rm -rf "$tmp"; return 1; }
-
-  # 解压：无 tar/gzip/xz 时自动 busybox 兜底
-  case "$url" in
-    *.tar.xz)
-      ensure_archiver || { echo "[ERROR] 缺少解压工具（tar/xz），且获取 busybox 失败"; rm -rf "$tmp"; return 1; }
-      if command -v tar >/dev/null 2>&1 && command -v xz >/dev/null 2>&1; then
-        tar -xJf "$pkg" -C "$tmp"
-      elif [ -n "${BB:-}" ] && [ -x "$BB" ]; then
-        "$BB" xz -dc "$pkg" | "$BB" tar -x -C "$tmp"
-      else
-        echo "[ERROR] 无法解压 .tar.xz 包"; rm -rf "$tmp"; return 1
-      fi
-      ;;
-    *.tar.gz|*.tgz)
-      ensure_archiver || { echo "[ERROR] 缺少解压工具（tar/gzip），且获取 busybox 失败"; rm -rf "$tmp"; return 1; }
-      extract_tgz "$pkg" "$tmp" || { echo "[ERROR] 解压失败"; rm -rf "$tmp"; return 1; }
-      ;;
-    *.zip)
-      if command -v unzip >/dev/null 2>&1; then
-        unzip -q "$pkg" -d "$tmp" || { echo "[ERROR] 解压 zip 失败"; rm -rf "$tmp"; return 1; }
-      elif [ -n "${BB:-}" ] && [ -x "$BB" ]; then
-        "$BB" unzip "$pkg" -d "$tmp" || { echo "[ERROR] busybox 解压 zip 失败"; rm -rf "$tmp"; return 1; }
-      else
-        echo "[ERROR] 缺少 unzip（或 busybox unzip）"; rm -rf "$tmp"; return 1
-      fi
-      ;;
-    *)
-      echo "[ERROR] 未知包格式：$url"; rm -rf "$tmp"; return 1
-      ;;
-  esac
-
-  # 安装可执行文件
-  fn="$(find "$tmp" -type f -name 'sing-box' -perm -u+x | head -n1)"
-  [ -n "$fn" ] || { echo "[ERROR] 包内未找到 sing-box"; rm -rf "$tmp"; return 1; }
-
-  install -m0755 "$fn" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+  install -m0755 "$tmp/sing-box" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
   echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
