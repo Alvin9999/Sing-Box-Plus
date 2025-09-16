@@ -66,31 +66,29 @@ EOF
 pm_refresh() {
   case "$PM" in
     apt)
-      # 允许发行信息改变（bullseye 由 stable→oldstable）
-      apt_allow_release_change
-      # 统一用 https
+      # 允许 bullseye 从 stable → oldstable 的发行信息变化
+      cat >/etc/apt/apt.conf.d/99allow-releaseinfo-change <<'CONF'
+Acquire::AllowReleaseInfoChange::Suite "true";
+Acquire::AllowReleaseInfoChange::Version "true";
+CONF
+
+      # 统一成 https
       sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
 
-      # 先尝试更新
+      # 修正 bullseye 的 security 行：把 bullseye/updates → debian-security bullseye-security
+      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list
+
+      # 刷新索引；失败则临时注释 backports 再试
       if ! apt-get update -y; then
-        # Debian10 兼容：仅在你设置 SBP_ALLOW_OLD=1 时启用归档源
-        if . /etc/os-release 2>/dev/null; then
-          if [ "${ID:-}" = "debian" ] && [ "${VERSION_ID%%.*}" -le 10 ] && [ "${SBP_ALLOW_OLD:-0}" = 1 ]; then
-            echo "[INFO] Debian 10 检测到，自动切换到 archive 源"
-            fix_buster_sources
-          fi
-        fi
-        # backports 镜像异常时临时注释并重试
         if grep -Eq '^[[:space:]]*deb .* bullseye-backports' /etc/apt/sources.list; then
           sed -i 's#^\([[:space:]]*deb .* bullseye-backports.*\)#\# \1#' /etc/apt/sources.list
         fi
-        # 放宽 Valid-Until（归档/镜像滞后常见）
-        apt-get update -y -o Acquire::Check-Valid-Until=false || [ "${SBP_SOFT:-0}" = 1 ]
+        apt-get update -y || [ "${SBP_SOFT:-0}" = 1 ]
       fi
       ;;
     pacman)  pacman -Sy --noconfirm || [ "${SBP_SOFT:-0}" = 1 ] ;;
     zypper)  zypper -n ref || true ;;
-    dnf|yum) : ;;
+    dnf|yum) : ;;  # dnf/yum 无需刷新
   esac
 }
 pm_install() {
