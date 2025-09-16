@@ -3,14 +3,7 @@
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
 #  Version: v2.2.0
 #  author：Alvin9999
-#  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
-#  说明：
-#   - 保留稳定版的 18 节点实现逻辑与链接格式；
-#   - 分享链接分两组输出（直连 9 / WARP 9），打印完即退出；
-#   - 卸载完成后直接退出；
-#   - SS2022 密钥标准 Base64，避免 “psk: illegal base64 …”；
-#   - WARP Reserved 缺失时容错为 0,0,0；
-#   - gen_uuid() 采用稳妥实现；状态栏/配色与菜单文案优化。
+#  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
 
 set -Eeuo pipefail
