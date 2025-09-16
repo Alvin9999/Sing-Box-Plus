@@ -17,12 +17,15 @@ stty erase ^H 2>/dev/null || true
 : "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
 : "${SBP_SOFT:=0}"                     # 1=宽松模式（失败尽量继续），默认 0=严格
 : "${SBP_BIN_ONLY:=1}"                 # 1=默认二进制模式，不用包管理器
-: "${SBP_SKIP_DEPS:=${SBP_BIN_ONLY}}"  # 默认随二进制模式一起跳过依赖检查
+: "${SBP_SKIP_DEPS:=1}}"  # 默认随二进制模式一起跳过依赖检查
 : "${SBP_FORCE_DEPS:=0}"               # 1=强制重新安装依赖
 
 : "${SBP_ROOT:=/var/lib/sing-box-plus}"
 : "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
 : "${SBP_DEPS_SENTINEL:=${SBP_ROOT}/.deps_ok}"
+
+# 统一用 IPv4 访问 GitHub，避免 IPv6 “No route to host” 耗时
+CURLX=(curl -fsSL -4 --connect-timeout 8 --retry 3)
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -164,25 +167,38 @@ _dl_jq_static() {
 }
 
 ensure_jq_static() {
-  # 已经有 jq 直接过
-  if command -v jq >/dev/null 2>&1; then return 0; fi
+  command -v jq >/dev/null 2>&1 && return 0
 
-  mkdir -p "$SBP_BIN_DIR"
+  local a u
+  a="$(detect_goarch)"   # 你的函数：返回 amd64/arm64/armv7/386
 
-  # 二进制模式 或 跳过依赖检查：只下载静态 jq，不调包管理器
-  if [ "${SBP_BIN_ONLY:-0}" = "1" ] || [ "${SBP_SKIP_DEPS:-0}" = "1" ]; then
-    if _dl_jq_static "$SBP_BIN_DIR/jq"; then
-      export PATH="$SBP_BIN_DIR:$PATH"
-      return 0
-    fi
-    echo "[ERROR] 下载 jq 失败"; return 1
-  fi
+  case "$a" in
+    amd64) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-amd64" ;;
+    arm64) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-arm64" ;;
+    armv7) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-armv7" ;;
+    386)   u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-386" ;;
+    *)     u="";;
+  esac
 
-  # 正常模式：包管理器优先，失败再静态下载
-  if pkg_install jq; then
+  if [ -n "$u" ] && with_retry 3 "${CURLX[@]}" -o /usr/local/bin/jq "$u"; then
+    chmod +x /usr/local/bin/jq
     return 0
   fi
-  _dl_jq_static "$SBP_BIN_DIR/jq" && export PATH="$SBP_BIN_DIR:$PATH"
+
+  # 可选：再尝试一次上游的 jq 静态包（不建议回退包管）
+  case "$a" in
+    amd64) u="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64" ;;
+    386)   u="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux32" ;;
+    arm64) u="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-aarch64" ;;
+    armv7) u="" ;;
+  esac
+  if [ -n "$u" ] && with_retry 3 "${CURLX[@]}" -o /usr/local/bin/jq "$u"; then
+    chmod +x /usr/local/bin/jq
+    return 0
+  fi
+
+  echo "[ERROR] 无法获取 jq（已禁用包管理器回退）。请检查 GitHub 连接或给镜像补齐 jq-* 文件。"
+  return 1
 }
 
 
@@ -214,71 +230,53 @@ CONF
 
 # 刷新软件仓（含各系兜底）
 sbp_pm_refresh() {
+  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && { echo "[INFO] 已跳过包管理器刷新（SBP_SKIP_DEPS=1）"; return 0; }
+  pm_quiet     # 第 3 步里会给出这个函数
   case "$PM" in
-    apt)
-      apt_allow_release_change
-      # http -> https
-      sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
-      # bullseye security 行修正：bullseye/updates -> debian-security bullseye-security
-      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list 2>/dev/null || true
-
-      # 跟随 IPv4/IPv6 选择：$APT_OPTS 由 net_apply_ip_mode 生成（为空则不加）
-      if ! with_retry 3 apt-get update -y $APT_OPTS; then
-        # backports 404 则临时注释后再试
-        sed -i 's#^\([[:space:]]*deb .* backports.*\)#\# \1#' /etc/apt/sources.list 2>/dev/null || true
-        with_retry 2 apt-get update -y $APT_OPTS -o Acquire::Check-Valid-Until=false || [ "$SBP_SOFT" = 1 ]
-      fi
-      ;;
-
-    dnf)
-      dnf clean metadata || true
-      # 跟随 IPv4/IPv6：--setopt=ip_resolve=4 在 YUMDNF_OPTS 中
-      with_retry 3 dnf "${YUMDNF_OPTS[@]}" makecache || [ "$SBP_SOFT" = 1 ]
-      ;;
-
-    yum)
-      yum clean all || true
-      with_retry 3 yum "${YUMDNF_OPTS[@]}" makecache fast || true
-      # EL7/老环境便于装 jq 等
-      yum "${YUMDNF_OPTS[@]}" install -y epel-release || true
-      ;;
-
-    pacman)
-      pacman-key --init >/dev/null 2>&1 || true
-      pacman-key --populate archlinux >/dev/null 2>&1 || true
-      with_retry 3 pacman -Syy --noconfirm || [ "$SBP_SOFT" = 1 ]
-      ;;
-
-    zypper)
-      zypper -n ref || zypper -n ref --force || true
-      ;;
+    apt) with_retry 3 apt-get -y update || true ;;
+    dnf) with_retry 3 dnf -y --setopt=install_weak_deps=False makecache || true ;;
+    yum) with_retry 3 yum -y makecache fast || true ;;
   esac
 }
 
-# 逐包安装（单个失败不拖累整体）
 sbp_pm_install() {
+  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && { echo "[INFO] 已跳过安装依赖（SBP_SKIP_DEPS=1）：$*"; return 0; }
+  pm_quiet
   case "$PM" in
-    apt)
-      local p; apt-get update -y >/dev/null 2>&1 || true
-      for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done
-      ;;
-    dnf)
-      local p; for p in "$@"; do dnf install -y "$p" || true; done
-      ;;
-    yum)
-      yum install -y epel-release || true
-      local p; for p in "$@"; do yum install -y "$p" || true; done
-      ;;
-    pacman)
-      pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ]
-      local p; for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done
-      ;;
-    zypper)
-      zypper -n ref || true
-      local p; for p in "$@"; do zypper --non-interactive install "$p" || true; done
-      ;;
+    apt) with_retry 3 apt-get -y install "$@" ;;
+    dnf) with_retry 3 dnf -y --setopt=install_weak_deps=False install "$@" ;;
+    yum) with_retry 3 yum -y install "$@" ;;
   esac
 }
+
+pm_quiet() {
+  # 如果本来就跳过依赖，直接返回
+  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && return 0
+
+  # 只在 RHEL 家族上处理
+  if command -v rpm >/dev/null 2>&1; then
+    # 尝试停掉会抢锁的服务
+    for u in packagekit dnf-makecache.timer dnf-makecache.service ; do
+      systemctl stop "$u" >/dev/null 2>&1 || true
+      systemctl disable --now "$u" >/dev/null 2>&1 || true
+    done
+
+    # 等待最多 30 秒让它们退出
+    for _ in $(seq 1 30); do
+      pgrep -fa 'dnf|yum|packagekit' >/dev/null || break
+      sleep 1
+    done
+
+    # 还在就强杀 + 清锁文件（谨慎使用）
+    if pgrep -fa 'dnf|yum|packagekit' >/dev/null; then
+      echo "[WARN] dnf/yum 仍在占用锁，尝试强制结束..."
+      pkill -9 -f 'dnf|yum|packagekit' || true
+      rm -f /var/run/dnf.pid /var/run/yum.pid /var/cache/dnf/metadata_lock.pid 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+}
+
 
 # 用包管理器装一轮依赖
 sbp_install_prereqs_pm() {
