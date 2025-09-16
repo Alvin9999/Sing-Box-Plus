@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.1.8
+#  Version: v2.2.0
 #  author：Alvin9999
 #  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
@@ -14,121 +14,260 @@
 # ============================================================
 
 set -Eeuo pipefail
+
 stty erase ^H # 让退格键在终端里正常工作
-# ===== [BEGIN] v2.1.8 依赖预装块（带缓存哨兵） =====
-# 模式：SBP_SOFT=1 为宽松模式（缺核心仅警告不退出）；默认严格模式
-: "${SBP_SOFT:=0}"
-# 依赖就绪的哨兵文件（可自定义路径）
+# ===== [BEGIN] SBP 引导模块 v2.2.0+（包管理器优先 + 二进制回退） =====
+# 模式与哨兵
+: "${SBP_SOFT:=0}"                               # 1=宽松模式（失败尽量继续），默认 0=严格
+: "${SBP_SKIP_DEPS:=0}"                          # 1=启动跳过依赖检查（只在菜单 1) 再装）
+: "${SBP_FORCE_DEPS:=0}"                         # 1=强制重新安装依赖
+: "${SBP_BIN_ONLY:=0}"                           # 1=强制走二进制模式，不用包管理器
+: "${SBP_ROOT:=/var/lib/sing-box-plus}"
+: "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
 : "${SBP_DEPS_SENTINEL:=/var/lib/sing-box-plus/.deps_ok}"
-# 强制重新安装依赖：SBP_FORCE_DEPS=1
-: "${SBP_FORCE_DEPS:=0}"
 
-# 需要 root
-[ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
+mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
+export PATH="$SBP_BIN_DIR:$PATH"
 
-# 是否已有全部核心命令
-already_has_core() {
-  local b
-  for b in curl jq tar unzip openssl; do
-    command -v "$b" >/dev/null 2>&1 || return 1
-  done
+# 工具：下载器 + 轻量重试
+dl() { # 用法：dl <URL> <OUT_PATH>
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 2 --connect-timeout 5 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    timeout 15 wget -qO "$out" --tries=2 "$url"
+  else
+    echo "[ERROR] 缺少 curl/wget：无法下载 $url"; return 1
+  fi
+}
+with_retry() { local n=${1:-3}; shift; local i=1; until "$@"; do [ $i -ge "$n" ] && return 1; sleep $((i*2)); i=$((i+1)); done; }
+
+# 工具：架构探测 + jq 静态兜底
+detect_goarch() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l|armv7) echo armv7 ;;
+    i386|i686)    echo 386   ;;
+    *)            echo amd64 ;;
+  esac
+}
+ensure_jq_static() {
+  command -v jq >/dev/null 2>&1 && return 0
+  local arch out="$SBP_BIN_DIR/jq" url alt
+  arch="$(detect_goarch)"
+  url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}"
+  alt="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64"
+  dl "$url" "$out" || { [ "$arch" = amd64 ] && dl "$alt" "$out" || true; }
+  chmod +x "$out" 2>/dev/null || true
+  command -v jq >/dev/null 2>&1
+}
+
+# 工具：核心命令自检
+sbp_core_ok() {
+  local need=(curl jq tar unzip openssl)
+  local b; for b in "${need[@]}"; do command -v "$b" >/dev/null 2>&1 || return 1; done
   return 0
 }
 
-# 包管理器检测/刷新/安装（逐包安装，单个失败不影响其它）
-detect_pm() {
+# —— 包管理器路径 —— #
+sbp_detect_pm() {
   if command -v apt-get >/dev/null 2>&1; then PM=apt
   elif command -v dnf      >/dev/null 2>&1; then PM=dnf
   elif command -v yum      >/dev/null 2>&1; then PM=yum
   elif command -v pacman   >/dev/null 2>&1; then PM=pacman
   elif command -v zypper   >/dev/null 2>&1; then PM=zypper
-  else echo "不支持的系统/包管理器"; exit 1; fi
+  else PM=unknown; fi
+  [ "$PM" = unknown ] && return 1 || return 0
 }
-pm_refresh() {
-  case "$PM" in
-    apt)    apt-get update -y || [ "$SBP_SOFT" = 1 ] ;;
-    pacman) pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ] ;;
-    zypper) zypper -n ref || true ;;
-    dnf|yum) : ;;
-  esac
+
+# apt 允许发行信息变化（stable→oldstable / Version 变化）
+apt_allow_release_change() {
+  cat >/etc/apt/apt.conf.d/99allow-releaseinfo-change <<'CONF'
+Acquire::AllowReleaseInfoChange::Suite "true";
+Acquire::AllowReleaseInfoChange::Version "true";
+CONF
 }
-pm_install() {
+
+# 刷新软件仓（含各系兜底）
+sbp_pm_refresh() {
   case "$PM" in
     apt)
+      apt_allow_release_change
+      sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
+      # 修正 bullseye 的 security 行：bullseye/updates → debian-security bullseye-security
+      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list
+
+      local AOPT=""
+      curl -6 -fsS --connect-timeout 2 https://deb.debian.org >/dev/null 2>&1 || AOPT='-o Acquire::ForceIPv4=true'
+
+      if ! with_retry 3 apt-get update -y $AOPT; then
+        # backports 404 临时注释再试
+        sed -i 's#^\([[:space:]]*deb .* bullseye-backports.*\)#\# \1#' /etc/apt/sources.list 2>/dev/null || true
+        with_retry 2 apt-get update -y $AOPT -o Acquire::Check-Valid-Until=false || [ "$SBP_SOFT" = 1 ]
+      fi
+      ;;
+    dnf)
+      dnf clean metadata || true
+      with_retry 3 dnf makecache || [ "$SBP_SOFT" = 1 ]
+      ;;
+    yum)
+      yum clean all || true
+      with_retry 3 yum makecache fast || true
+      yum install -y epel-release || true   # EL7/老环境便于装 jq 等
+      ;;
+    pacman)
+      pacman-key --init >/dev/null 2>&1 || true
+      pacman-key --populate archlinux >/dev/null 2>&1 || true
+      with_retry 3 pacman -Syy --noconfirm || [ "$SBP_SOFT" = 1 ]
+      ;;
+    zypper)
+      zypper -n ref || zypper -n ref --force || true
+      ;;
+  esac
+}
+
+# 逐包安装（单个失败不拖累整体）
+sbp_pm_install() {
+  case "$PM" in
+    apt)
+      local p; apt-get update -y >/dev/null 2>&1 || true
       for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done
       ;;
     dnf)
-      for p in "$@"; do dnf install -y "$p" || true; done
+      local p; for p in "$@"; do dnf install -y "$p" || true; done
       ;;
     yum)
-      yum install -y epel-release || true   # EL7/老环境：jq 通常在 EPEL
-      for p in "$@"; do yum install -y "$p" || true; done
+      yum install -y epel-release || true
+      local p; for p in "$@"; do yum install -y "$p" || true; done
       ;;
     pacman)
-      for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done
+      pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ]
+      local p; for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done
       ;;
     zypper)
-      for p in "$@"; do zypper --non-interactive install "$p" || true; done
+      zypper -n ref || true
+      local p; for p in "$@"; do zypper --non-interactive install "$p" || true; done
       ;;
   esac
 }
 
-install_prereqs() {
-  # —— 短路：有哨兵且核心命令齐全时，直接跳过安装 ——
-  if [ "$SBP_FORCE_DEPS" != 1 ] && already_has_core && [ -f "$SBP_DEPS_SENTINEL" ]; then
-    echo "[INFO] 依赖已安装"
+# 用包管理器装一轮依赖
+sbp_install_prereqs_pm() {
+  sbp_detect_pm || return 1
+  sbp_pm_refresh
+
+  case "$PM" in
+    apt)    CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz-utils uuid-runtime iproute2 iptables ufw) ;;
+    dnf|yum)CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute iptables iptables-nft firewalld) ;;
+    pacman) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 iptables) ;;
+    zypper) CORE=(curl jq tar unzip openssl); EXTRA=(ca-certificates xz util-linux iproute2 iptables firewalld) ;;
+    *) return 1 ;;
+  esac
+
+  sbp_pm_install "${CORE[@]}" "${EXTRA[@]}"
+
+  # jq 兜底：安装失败时下载静态 jq
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "[INFO] 通过包管理器安装 jq 失败，尝试下载静态 jq ..."
+    ensure_jq_static || { echo "[ERROR] 无法获取 jq"; return 1; }
+  fi
+
+  # 严格模式：核心仍缺则失败
+  if ! sbp_core_ok; then
+    [ "$SBP_SOFT" = 1 ] || return 1
+    echo "[WARN] 核心依赖未就绪（宽松模式继续）"
+  fi
+  return 0
+}
+
+# —— 二进制模式：直接获取 sing-box 可执行文件 —— #
+install_singbox_binary() {
+  local arch goarch pkg tmp json url fn
+  goarch="$(detect_goarch)"
+  tmp="$(mktemp -d)" || return 1
+
+  ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
+
+  json="$(with_retry 3 curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || { rm -rf "$tmp"; return 1; }
+  url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
+    .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
+  ' | head -n1)"
+
+  if [ -z "$url" ] || [ "$url" = "null" ]; then
+    echo "[ERROR] 未找到匹配架构($goarch)的 sing-box 资产"; rm -rf "$tmp"; return 1
+  fi
+
+  pkg="$tmp/pkg"
+  with_retry 3 dl "$url" "$pkg" || { rm -rf "$tmp"; return 1; }
+
+  case "$url" in
+    *.tar.xz)  if command -v xz >/dev/null 2>&1; then tar -xJf "$pkg" -C "$tmp"; else echo "[ERROR] 缺少 xz；请安装 xz/xz-utils 或换 .tar.gz/.zip"; rm -rf "$tmp"; return 1; fi ;;
+    *.tar.gz)  tar -xzf "$pkg" -C "$tmp" ;;
+    *.zip)     unzip -q "$pkg" -d "$tmp" || { echo "[ERROR] 缺少 unzip"; rm -rf "$tmp"; return 1; } ;;
+    *)         echo "[ERROR] 未知包格式：$url"; rm -rf "$tmp"; return 1 ;;
+  esac
+
+  fn="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  [ -n "$fn" ] || { echo "[ERROR] 包内未找到 sing-box"; rm -rf "$tmp"; return 1; }
+
+  install -m 0755 "$fn" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
+}
+
+# 证书兜底（有 openssl 就生成；没有就先跳过，由业务决定是否强制）
+ensure_tls_cert() {
+  local dir="$SBP_ROOT"
+  mkdir -p "$dir"
+  if command -v openssl >/dev/null 2>&1; then
+    [[ -f "$dir/private.key" ]] || openssl ecparam -genkey -name prime256v1 -out "$dir/private.key" >/dev/null 2>&1
+    [[ -f "$dir/cert.pem"    ]] || openssl req -new -x509 -days 36500 -key "$dir/private.key" -out "$dir/cert.pem" -subj "/CN=www.bing.com" >/dev/null 2>&1
+  fi
+}
+
+# 标记哨兵
+sbp_mark_deps_ok() {
+  if sbp_core_ok; then
+    mkdir -p "$(dirname "$SBP_DEPS_SENTINEL")" && : > "$SBP_DEPS_SENTINEL" || true
+  fi
+}
+
+# 入口：装依赖 / 二进制回退
+sbp_bootstrap() {
+  [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
+
+  if [ "$SBP_SKIP_DEPS" = 1 ]; then
+    echo "[INFO] 已跳过启动时依赖检查（SBP_SKIP_DEPS=1）"
     return 0
   fi
 
-  detect_pm
-  pm_refresh
-
-  case "$PM" in
-    apt)
-      CORE=(curl jq tar unzip openssl)
-      EXTRA=(ca-certificates xz-utils uuid-runtime iproute2 iptables ufw)
-      ;;
-    dnf|yum)
-      CORE=(curl jq tar unzip openssl)
-      EXTRA=(ca-certificates xz util-linux iproute iptables iptables-nft firewalld)
-      ;;
-    pacman)
-      CORE=(curl jq tar unzip openssl)
-      EXTRA=(ca-certificates xz util-linux iproute2 iptables)
-      ;;
-    zypper)
-      CORE=(curl jq tar unzip openssl)
-      EXTRA=(ca-certificates xz util-linux iproute2 iptables firewalld)
-      ;;
-  esac
-
-  pm_install "${CORE[@]}" "${EXTRA[@]}"
-}
-
-# 核心依赖自检（宽松模式仅警告，严格模式退出）
-check_bins() {
-  local need=(curl jq tar unzip openssl) miss=()
-  for b in "${need[@]}"; do command -v "$b" >/dev/null 2>&1 || miss+=("$b"); done
-  if [ "${#miss[@]}" -gt 0 ]; then
-    if [ "$SBP_SOFT" = 1 ]; then
-      echo "[WARN] 关键依赖未就绪：${miss[*]} —— 将尝试继续运行"
-    else
-      echo "[ERROR] 关键依赖未就绪：${miss[*]}"; exit 1
-    fi
+  # 已就绪则跳过
+  if [ "$SBP_FORCE_DEPS" != 1 ] && sbp_core_ok && [ -f "$SBP_DEPS_SENTINEL" ] && [ "$SBP_BIN_ONLY" != 1 ]; then
+    echo "依赖已安装"
+    return 0
   fi
-}
 
-# 成功后打哨兵标记（仅当核心命令齐全）
-mark_deps_ok() {
-  if already_has_core; then
-    mkdir -p "$(dirname "$SBP_DEPS_SENTINEL")" && touch "$SBP_DEPS_SENTINEL" || true
+  # 强制二进制模式
+  if [ "$SBP_BIN_ONLY" = 1 ]; then
+    echo "[INFO] 二进制模式（SBP_BIN_ONLY=1）"
+    install_singbox_binary || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
+    ensure_tls_cert
+    return 0
   fi
-}
 
-install_prereqs
-check_bins
-mark_deps_ok
-# ===== [END] v2.1.8 依赖预装块（带缓存哨兵） =====
+  # 包管理器优先
+  if sbp_install_prereqs_pm; then
+    sbp_mark_deps_ok
+    return 0
+  fi
+
+  # 回退到二进制模式
+  echo "[WARN] 包管理器依赖安装失败，切换到二进制模式"
+  install_singbox_binary || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
+  ensure_tls_cert
+}
+# ===== [END] SBP 引导模块 v2.2.0+ =====
 
 
 # ===== 提前设默认，避免 set -u 早期引用未定义变量导致脚本直接退出 =====
@@ -154,7 +293,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.1.8"
+SCRIPT_VERSION="v2.2.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -855,6 +994,7 @@ menu(){
   read -rp "选择: " op || true
   case "${op:-}" in
   1)
+    sbp_bootstrap                      # ← 新增：先做依赖/二进制回退引导
     echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
     install_singbox
     ensure_warp_profile || true
