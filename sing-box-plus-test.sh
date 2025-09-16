@@ -1013,27 +1013,74 @@ write_config(){
 
 # ===== 防火墙 =====
 open_firewall(){
-  local rules=()
-  rules+=("${PORT_VLESSR}/tcp" "${PORT_VLESS_GRPCR}/tcp" "${PORT_TROJANR}/tcp" "${PORT_VMESS_WS}/tcp")
-  rules+=("${PORT_HY2}/udp" "${PORT_HY2_OBFS}/udp" "${PORT_TUIC}/udp")
-  rules+=("${PORT_SS2022}/tcp" "${PORT_SS2022}/udp" "${PORT_SS}/tcp" "${PORT_SS}/udp")
-  rules+=("${PORT_VLESSR_W}/tcp" "${PORT_VLESS_GRPCR_W}/tcp" "${PORT_TROJANR_W}/tcp" "${PORT_VMESS_WS_W}/tcp")
-  rules+=("${PORT_HY2_W}/udp" "${PORT_HY2_OBFS_W}/udp" "${PORT_TUIC_W}/udp")
-  rules+=("${PORT_SS2022_W}/tcp" "${PORT_SS2022_W}/udp" "${PORT_SS_W}/tcp" "${PORT_SS_W}/udp")
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q -E "active|活跃"; then
-    for r in "${rules[@]}"; do ufw allow "$r" >/dev/null 2>&1 || true; done; ufw reload >/dev/null 2>&1 || true
+  # 动态收集需要放行的端口（端口变量为空则自动忽略）
+  local -a rules=()
+  local p proto r v
+
+  _add() { v="${!1}"; proto="$2"; [[ -n "$v" ]] && rules+=("$v/$proto"); }
+
+  # ==== 常规端口 ====
+  _add PORT_VLESSR        tcp
+  _add PORT_VLESS_GRPCR   tcp
+  _add PORT_TROJANR       tcp
+  _add PORT_VMESS_WS      tcp
+  _add PORT_HY2           udp
+  _add PORT_HY2_OBFS      udp
+  _add PORT_TUIC          udp
+  _add PORT_SS            tcp
+  _add PORT_SS            udp
+  _add PORT_SS2022        tcp
+
+  # ==== WARP 端口（如果你定义了 *_W 变量会自动加入）====
+  _add PORT_VLESSR_W      tcp
+  _add PORT_TROJANR_W     tcp
+  _add PORT_VMESS_WS_W    tcp
+  _add PORT_HY2_W         udp
+  _add PORT_TUIC_W        udp
+  _add PORT_SS_W          tcp
+  _add PORT_SS_W          udp
+  _add PORT_SS2022_W      tcp
+
+  # 尝试使用 ufw
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qE 'active|活跃'; then
+    for r in "${rules[@]}"; do
+      p="${r%/*}"; proto="${r#*/}"
+      ufw allow "$p/$proto" >/dev/null 2>&1 || true
+    done
+    ufw reload >/dev/null 2>&1 || true
+    return 0
+
+  # 尝试使用 firewalld
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     systemctl enable --now firewalld >/dev/null 2>&1 || true
-    for r in "${rules[@]}"; do firewall-cmd --permanent --add-port="$r" >/dev/null 2>&1 || true; done; firewall-cmd --reload >/dev/null 2>&1 || true
-  else
-    local p proto
-    for r in "${rules[@]}"; do p="${r%/*}"; proto="${r#*/}";
-      if [[ "$proto" == tcp ]]; then iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT; fi
-      if [[ "$proto" == udp ]]; then iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT; fi
+    for r in "${rules[@]}"; do
+      p="${r%/*}"; proto="${r#*/}"
+      firewall-cmd --permanent --add-port="${p}/${proto}" >/dev/null 2>&1 || true
     done
-    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    return 0
+
+  # 方案 A：仅当系统有 iptables 时才落到这里
+  else
+    if command -v iptables >/dev/null 2>&1; then
+      for r in "${rules[@]}"; do
+        p="${r%/*}"; proto="${r#*/}"
+        if [[ "$proto" == tcp ]]; then
+          iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || \
+          iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null
+        else
+          iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || \
+          iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null
+        fi
+      done
+      command -v netfilter-persistent >/dev/null 2>&1 && \
+        netfilter-persistent save >/dev/null 2>&1 || true
+    else
+      echo "[WARN] 未检测到 ufw/firewalld/iptables，已跳过防火墙放行；如被防火墙拦截请手动开放端口。"
+    fi
   fi
 }
+
 
 # ===== 分享链接（分组输出 + 提示） =====
 print_links_grouped(){
