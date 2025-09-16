@@ -1000,17 +1000,20 @@ menu(){
   read -rp "选择: " op || true
   case "${op:-}" in
   1)
-    sbp_bootstrap                      # ← 新增：先做依赖/二进制回退引导
-    echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
-    install_singbox
-    ensure_warp_profile || true
-    write_config
-    write_systemd
-    open_firewall
-    systemctl restart "${SYSTEMD_SERVICE}" || true
-    print_links_grouped
-    exit 0
-    ;;
+  sbp_bootstrap                                     # 依赖/二进制回退
+  set +e                                            # ← 关闭严格退出，避免中途被杀掉
+  echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
+  install_singbox            || true
+  ensure_warp_profile        || true
+  write_config               || { echo "[ERR] 生成配置失败"; }
+  write_systemd              || true
+  open_firewall              || true
+  systemctl restart "${SYSTEMD_SERVICE}" || true
+  set -e                                            # ← 恢复严格模式
+  print_links_grouped
+  read -rp "回车返回..." _ || true
+  menu
+  ;;
     2) if ensure_installed_or_hint; then print_links_grouped; exit 0; fi ;;
     3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
    4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
