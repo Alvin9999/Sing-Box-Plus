@@ -47,13 +47,11 @@
 ## 📥 一键安装 / 更新脚本
 
 ```bash
-# 推荐（wget）
 wget -O sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999/Sing-Box-Plus/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
 ```
 或者
 
 ```bash
-# 可选（curl）
 curl -fsSL -o sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999/Sing-Box-Plus/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
 
 ```
