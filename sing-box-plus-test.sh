@@ -14,6 +14,8 @@
 # ============================================================
 
 set -Eeuo pipefail
+
+stty erase ^H # 让退格键在终端里正常工作
 # ===== [BEGIN] v2.1.8 依赖预装块（带缓存哨兵） =====
 # 模式：SBP_SOFT=1 为宽松模式（缺核心仅警告不退出）；默认严格模式
 : "${SBP_SOFT:=0}"
@@ -772,6 +774,7 @@ banner(){
   hr
   echo -e " ${C_CYAN}🚀 ${SCRIPT_NAME} ${SCRIPT_VERSION} 🚀${C_RESET}"
   echo -e "${C_CYAN} 脚本更新地址: https://github.com/Alvin9999/Sing-Box-Plus${C_RESET}"
+
   hr
   echo -e "系统加速状态：$(bbr_state)"
   echo -e "Sing-Box 启动状态：$(sb_service_state)"
