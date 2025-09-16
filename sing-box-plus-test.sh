@@ -280,7 +280,7 @@ pick_mirror_asset() {
 }
 
 # —— 二进制模式：直接获取 sing-box 可执行文件 —— #
-# —— 二进制模式：优先你的镜像，失败再回退官方 —— #
+# —— 二进制模式：优先镜像，失败再回退官方 —— #
 install_singbox_binary() {
   local goarch tmp asset url pkg fn json
 
@@ -288,7 +288,7 @@ install_singbox_binary() {
   tmp="$(mktemp -d)" || return 1
   pkg="$tmp/pkg"
 
-  # 1) 先试你的 Release 直链（无需 jq，速度快）
+  # 1) 先试 Release 直链（无需 jq，速度快）
   if [ -n "${SBP_BIN_MIRROR:-}" ]; then
     asset="$(pick_mirror_asset "$goarch")"
     if [ -n "$asset" ]; then
@@ -720,7 +720,7 @@ install_wgcf() {
     *)     GOA=amd64 ;;
   esac
 
-  # 确保有 jq（你的引导模块里一般有 ensure_jq_static；没有就略过这步）
+  # 确保有 jq（引导模块里一般有 ensure_jq_static；没有就略过这步）
   if ! command -v jq >/dev/null 2>&1; then
     type ensure_jq_static >/dev/null 2>&1 && ensure_jq_static || {
       echo "[WARN] 缺少 jq，无法解析 GitHub API"; return 1;
