@@ -59,7 +59,7 @@ net_apply_ip_mode() {
   fi
 }
 
-map_singbox_asset() {  # 输入 goarch，输出你仓库里的文件名
+map_singbox_asset() {  # 输入 goarch，输出仓库里的文件名
   case "$1" in
     amd64) echo "sing-box-amd64" ;;
     arm64) echo "sing-box-arm64" ;;
@@ -170,7 +170,7 @@ ensure_jq_static() {
   command -v jq >/dev/null 2>&1 && return 0
 
   local a u
-  a="$(detect_goarch)"   # 你的函数：返回 amd64/arm64/armv7/386
+  a="$(detect_goarch)"   # 函数：返回 amd64/arm64/armv7/386
 
   case "$a" in
     amd64) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-amd64" ;;
@@ -307,7 +307,7 @@ sbp_install_prereqs_pm() {
   return 0
 }
 
-# 把 GOARCH 映射为你 Release 中的资产文件名
+# 把 GOARCH 映射为 Release 中的资产文件名
 pick_mirror_asset() {
   case "$1" in
     amd64)         echo "sing-box-amd64" ;;
@@ -328,7 +328,7 @@ install_singbox_binary() {
 
   tmp="$(mktemp -d)" || return 1
 
-  # 1) 先走你的镜像（不需要 jq / 包管理器）
+  # 1) 先走镜像（不需要 jq / 包管理器）
   url="$SBP_BIN_MIRROR/$SBP_BIN_VER/$fn"
   if with_retry 2 dl "$url" "$tmp/sing-box"; then
     :
@@ -430,9 +430,9 @@ SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
 BIN_PATH=${BIN_PATH:-/usr/local/bin/sing-box}
 SB_DIR=${SB_DIR:-/opt/sing-box}
 CONF_JSON=${CONF_JSON:-$SB_DIR/config.json}
-# —— mirror 配置（你自己的 Release）——
+# —— mirror 配置（自己的 Release）——
 : "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
-: "${SBP_BIN_TAG:=v1.12.8}"     # 你当前发布的 tag；后续更换版本只改这里即可
+: "${SBP_BIN_TAG:=v1.12.8}"     # 当前发布的 tag；后续更换版本只改这里即可
 DATA_DIR=${DATA_DIR:-$SB_DIR/data}
 CERT_DIR=${CERT_DIR:-$SB_DIR/cert}
 WGCF_DIR=${WGCF_DIR:-$SB_DIR/wgcf}
@@ -917,7 +917,7 @@ systemctl daemon-reload
 systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 }
 
-# ===== 写 config.json（使用你提供的稳定配置逻辑） =====
+# ===== 写 config.json（使用提供的稳定配置逻辑） =====
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
   ensure_creds; save_all_ports; mk_cert
@@ -1031,7 +1031,7 @@ open_firewall(){
   _add PORT_SS            udp
   _add PORT_SS2022        tcp
 
-  # ==== WARP 端口（如果你定义了 *_W 变量会自动加入）====
+  # ==== WARP 端口（如果定义了 *_W 变量会自动加入）====
   _add PORT_VLESSR_W      tcp
   _add PORT_TROJANR_W     tcp
   _add PORT_VMESS_WS_W    tcp
