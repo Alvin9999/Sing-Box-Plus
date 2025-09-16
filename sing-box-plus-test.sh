@@ -3,7 +3,7 @@
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
 #  Version: v2.3.0
 #  author：Alvin9999
-#  Repo:    https://github.com/Alvin9999/Sing-Box-Plus
+#  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 #  说明：
 #   - 保留稳定版的 18 节点实现逻辑与链接格式；
 #   - 分享链接分两组输出（直连 9 / WARP 9），打印完即退出；
