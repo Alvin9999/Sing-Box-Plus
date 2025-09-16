@@ -29,17 +29,47 @@ stty erase ^H # 让退格键在终端里正常工作
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
 
-# 工具：下载器 + 轻量重试
-dl() { # 用法：dl <URL> <OUT_PATH>
-  local url="$1" out="$2"
+# —— IPv4/IPv6 选择：auto(默认)/1(强制IPv4)/0(允许IPv6) ——
+: "${SBP_FORCE_IPV4:=auto}"   # 可用 SBP_FORCE_IPV4=1 覆盖
+
+# 3 秒快速探测 IPv6；失败就用 IPv4
+net_pick_ip_mode() {
+  # 显式指定就直接生效
+  [ "$SBP_FORCE_IPV4" = "1" ] && { SBP_IPV4=1; return; }
+  [ "$SBP_FORCE_IPV4" = "0" ] && { SBP_IPV4=0; return; }
+
+  # auto：优先试 IPv6（curl/wget 任意一个可用即可）
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 2 --connect-timeout 5 -o "$out" "$url"
+    curl -s6 --connect-timeout 3 https://api.github.com >/dev/null 2>&1 && { SBP_IPV4=0; return; }
   elif command -v wget >/dev/null 2>&1; then
-    timeout 15 wget -qO "$out" --tries=2 "$url"
-  else
-    echo "[ERROR] 缺少 curl/wget：无法下载 $url"; return 1
+    timeout 4 wget -6 -qO- https://api.github.com >/dev/null 2>&1 && { SBP_IPV4=0; return; }
+  fi
+  SBP_IPV4=1
+}
+
+# 把选好的 IP 策略“应用”为全局选项（供 dl/apt/yum/dnf 统一使用）
+net_apply_ip_mode() {
+  CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
+  if [ "${SBP_IPV4:-0}" = 1 ]; then
+    CURLX+=(--ipv4)
+    WGETX+=(-4)
+    APT_OPTS='-o Acquire::ForceIPv4=true'
+    YUMDNF_OPTS+=(--setopt=ip_resolve=4)
   fi
 }
+
+# 工具：下载器 + 轻量重试
+dl() {  # 用法：dl <URL> <OUT_PATH>
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 --retry 2 -o "$out" "$url" && return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    timeout 15 wget "${WGETX[@]}" -qO "$out" --tries=2 --timeout=8 "$url" && return 0
+  fi
+  echo "[ERROR] 缺少可用下载器"; return 1
+}
+
 with_retry() { local n=${1:-3}; shift; local i=1; until "$@"; do [ $i -ge "$n" ] && return 1; sleep $((i*2)); i=$((i+1)); done; }
 
 # 工具：架构探测 + jq 静态兜底
@@ -94,33 +124,38 @@ sbp_pm_refresh() {
   case "$PM" in
     apt)
       apt_allow_release_change
+      # http -> https
       sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
-      # 修正 bullseye 的 security 行：bullseye/updates → debian-security bullseye-security
-      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list
+      # bullseye security 行修正：bullseye/updates -> debian-security bullseye-security
+      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list 2>/dev/null || true
 
-      local AOPT=""
-      curl -6 -fsS --connect-timeout 2 https://deb.debian.org >/dev/null 2>&1 || AOPT='-o Acquire::ForceIPv4=true'
-
-      if ! with_retry 3 apt-get update -y $AOPT; then
-        # backports 404 临时注释再试
-        sed -i 's#^\([[:space:]]*deb .* bullseye-backports.*\)#\# \1#' /etc/apt/sources.list 2>/dev/null || true
-        with_retry 2 apt-get update -y $AOPT -o Acquire::Check-Valid-Until=false || [ "$SBP_SOFT" = 1 ]
+      # 跟随 IPv4/IPv6 选择：$APT_OPTS 由 net_apply_ip_mode 生成（为空则不加）
+      if ! with_retry 3 apt-get update -y $APT_OPTS; then
+        # backports 404 则临时注释后再试
+        sed -i 's#^\([[:space:]]*deb .* backports.*\)#\# \1#' /etc/apt/sources.list 2>/dev/null || true
+        with_retry 2 apt-get update -y $APT_OPTS -o Acquire::Check-Valid-Until=false || [ "$SBP_SOFT" = 1 ]
       fi
       ;;
+
     dnf)
       dnf clean metadata || true
-      with_retry 3 dnf makecache || [ "$SBP_SOFT" = 1 ]
+      # 跟随 IPv4/IPv6：--setopt=ip_resolve=4 在 YUMDNF_OPTS 中
+      with_retry 3 dnf "${YUMDNF_OPTS[@]}" makecache || [ "$SBP_SOFT" = 1 ]
       ;;
+
     yum)
       yum clean all || true
-      with_retry 3 yum makecache fast || true
-      yum install -y epel-release || true   # EL7/老环境便于装 jq 等
+      with_retry 3 yum "${YUMDNF_OPTS[@]}" makecache fast || true
+      # EL7/老环境便于装 jq 等
+      yum "${YUMDNF_OPTS[@]}" install -y epel-release || true
       ;;
+
     pacman)
       pacman-key --init >/dev/null 2>&1 || true
       pacman-key --populate archlinux >/dev/null 2>&1 || true
       with_retry 3 pacman -Syy --noconfirm || [ "$SBP_SOFT" = 1 ]
       ;;
+
     zypper)
       zypper -n ref || zypper -n ref --force || true
       ;;
@@ -189,7 +224,7 @@ install_singbox_binary() {
 
   ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
 
-  json="$(with_retry 3 curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || { rm -rf "$tmp"; return 1; }
+ json="$(with_retry 3 curl "${CURLX[@]}" -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || { rm -rf "$tmp"; return 1; }
   url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
     .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
   ' | head -n1)"
@@ -237,6 +272,10 @@ sbp_mark_deps_ok() {
 sbp_bootstrap() {
   [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
+  # 【新增】3 秒快速探测 v6 → 统一应用到 curl/wget/apt/yum 等
+  net_pick_ip_mode
+  net_apply_ip_mode
+  
   if [ "$SBP_SKIP_DEPS" = 1 ]; then
     echo "[INFO] 已跳过启动时依赖检查（SBP_SKIP_DEPS=1）"
     return 0
@@ -372,11 +411,11 @@ safe_source_env(){ # 安全 source，忽略不存在文件
   set -u
 }
 
-get_ip(){ # 多源获取公网IP
+get_ip(){  # 多源获取公网IP
   local ip
-  ip=$(curl -fsSL ipv4.icanhazip.com || true)
-  [[ -z "$ip" ]] && ip=$(curl -fsSL ifconfig.me || true)
-  [[ -z "$ip" ]] && ip=$(curl -fsSL ip.sb || true)
+  ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
+  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
+  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ip.sb || true)
   echo "${ip:-127.0.0.1}"
 }
 
@@ -550,20 +589,51 @@ ensure_creds(){
 
 # ===== WARP（wgcf） =====
 WGCF_BIN=/usr/local/bin/wgcf
-install_wgcf(){
+install_wgcf() {
+  # 已有可执行就跳过
   [[ -x "$WGCF_BIN" ]] && return 0
-  local GOA url tmp
+
+  # 架构映射
+  local GOA url tmp json
   case "$(arch_map)" in
-    amd64) GOA=amd64;; arm64) GOA=arm64;; armv7) GOA=armv7;; 386) GOA=386;; *) GOA=amd64;;
+    amd64) GOA=amd64 ;;
+    arm64) GOA=arm64 ;;
+    armv7) GOA=armv7 ;;
+    386)   GOA=386   ;;
+    *)     GOA=amd64 ;;
   esac
-  url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-        | jq -r ".assets[] | select(.name|test(\"linux_${GOA}$\")) | .browser_download_url" | head -n1)
-  [[ -n "$url" ]] || { warn "获取 wgcf 下载地址失败"; return 1; }
-  tmp=$(mktemp -d)
-  curl -fsSL "$url" -o "$tmp/wgcf"
-  install -m0755 "$tmp/wgcf" "$WGCF_BIN"
+
+  # 确保有 jq（你的引导模块里一般有 ensure_jq_static；没有就略过这步）
+  if ! command -v jq >/dev/null 2>&1; then
+    type ensure_jq_static >/dev/null 2>&1 && ensure_jq_static || {
+      echo "[WARN] 缺少 jq，无法解析 GitHub API"; return 1;
+    }
+  fi
+
+  # 取最新发布信息（跟随 IPv4/IPv6 策略，短超时 + 重试）
+  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
+          https://api.github.com/repos/ViRb3/wgcf/releases/latest)" || true
+
+  # 从 assets 中挑出 linux_${GOA} 结尾的下载地址
+  if [[ -n "$json" ]]; then
+    url="$(printf '%s' "$json" \
+          | jq -r --arg GOA "linux_${GOA}" '.assets[] | select(.name|test($GOA + "$")) | .browser_download_url' \
+          | head -n1)"
+  fi
+
+  [[ -n "$url" ]] || { echo "[WARN] 获取 wgcf 下载地址失败"; return 1; }
+
+  # 下载并安装（用 dl() 带短超时/IPv4 选择）
+  tmp="$(mktemp -d)" || { echo "[WARN] mktemp 失败"; return 1; }
+  if ! dl "$url" "$tmp/wgcf"; then
+    echo "[WARN] 下载 wgcf 失败：$url"; rm -rf "$tmp"; return 1
+  fi
+
+  install -m0755 "$tmp/wgcf" "$WGCF_BIN" || { echo "[WARN] 安装 wgcf 失败"; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
+  return 0
 }
+
 
 # —— Base64 清理 + 补齐：去掉引号/空白，长度 %4==2 补“==”，%4==3 补“=” ——
 pad_b64(){
