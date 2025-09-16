@@ -51,6 +51,7 @@ net_apply_ip_mode() {
   fi
 }
 
+
 # 工具：下载器 + 轻量重试
 dl() {  # 用法：dl <URL> <OUT_PATH>
   local url="$1" out="$2"
@@ -64,6 +65,60 @@ dl() {  # 用法：dl <URL> <OUT_PATH>
 }
 
 with_retry() { local n=${1:-3}; shift; local i=1; until "$@"; do [ $i -ge "$n" ] && return 1; sleep $((i*2)); i=$((i+1)); done; }
+
+ensure_busybox() {
+  mkdir -p "$SBP_BIN_DIR"
+  local bb="$SBP_BIN_DIR/busybox" url=""
+  case "$(uname -m)" in
+    x86_64|amd64)  url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-x86_64" ;;
+    aarch64|arm64) url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-aarch64" ;;
+    armv7l|armv7)  url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-armv7l" ;;
+    *) return 1 ;;
+  esac
+  [ -x "$bb" ] || { dl "$url" "$bb" && chmod +x "$bb" || return 1; }
+  BB="$bb"
+}
+
+ensure_archiver() {
+  # 1) 系统自带最好
+  if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+    TAR="tar"; GZIP="gzip"; return 0
+  fi
+
+  # 2) 小范围尝试装（不等锁，快速失败）
+  if command -v dnf >/dev/null 2>&1; then
+    timeout 25 dnf --setopt=exit_on_lock=True install -y tar gzip xz || true
+  elif command -v yum >/dev/null 2>&1; then
+    timeout 25 yum install -y tar gzip xz || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    timeout 25 apt-get update -y $APT_OPTS || true
+    timeout 25 apt-get install -y --no-install-recommends tar gzip xz-utils || true
+  elif command -v zypper >/dev/null 2>&1; then
+    timeout 25 zypper -n in -y tar gzip xz || true
+  elif command -v pacman >/dev/null 2>&1; then
+    timeout 25 pacman -Sy --noconfirm tar gzip xz || true
+  fi
+  if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+    TAR="tar"; GZIP="gzip"; return 0
+  fi
+
+  # 3) 仍不行：busybox 兜底
+  ensure_busybox || return 1
+  TAR="$BB tar"; GZIP="$BB gzip"; XZ="$BB xz"
+  export TAR GZIP XZ
+  return 0
+}
+
+extract_tgz() {  # extract_tgz <tgz> <destdir>
+  local tgz="$1" dest="$2"
+  mkdir -p "$dest"
+  if [ -n "${BB:-}" ] && [ -x "$BB" ] && ! command -v tar >/dev/null 2>&1; then
+    # 纯 busybox 情况：用 gzip -dc 管道给 tar
+    "$BB" gzip -dc "$tgz" | "$BB" tar -x -C "$dest"
+  else
+    $TAR -xzf "$tgz" -C "$dest"
+  fi
+}
 
 # 工具：架构探测 + jq 静态兜底
 detect_goarch() {
@@ -211,13 +266,19 @@ sbp_install_prereqs_pm() {
 
 # —— 二进制模式：直接获取 sing-box 可执行文件 —— #
 install_singbox_binary() {
-  local arch goarch pkg tmp json url fn
+  local goarch pkg tmp json url fn
   goarch="$(detect_goarch)"
   tmp="$(mktemp -d)" || return 1
 
+  # 需要 jq 解析 GitHub API
   ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
 
- json="$(with_retry 3 curl "${CURLX[@]}" -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || { rm -rf "$tmp"; return 1; }
+  # 获取最新 release
+  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 20 \
+          https://api.github.com/repos/SagerNet/sing-box/releases/latest)" \
+        || { rm -rf "$tmp"; return 1; }
+
+  # 取对应架构的下载地址（优先 tar.gz / tar.xz / zip）
   url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
     .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
   ' | head -n1)"
@@ -226,23 +287,49 @@ install_singbox_binary() {
     echo "[ERROR] 未找到匹配架构($goarch)的 sing-box 资产"; rm -rf "$tmp"; return 1
   fi
 
+  # 下载包
   pkg="$tmp/pkg"
   with_retry 3 dl "$url" "$pkg" || { rm -rf "$tmp"; return 1; }
 
+  # 解压：无 tar/gzip/xz 时自动 busybox 兜底
   case "$url" in
-    *.tar.xz)  if command -v xz >/dev/null 2>&1; then tar -xJf "$pkg" -C "$tmp"; else echo "[ERROR] 缺少 xz；请安装 xz/xz-utils 或换 .tar.gz/.zip"; rm -rf "$tmp"; return 1; fi ;;
-    *.tar.gz)  tar -xzf "$pkg" -C "$tmp" ;;
-    *.zip)     unzip -q "$pkg" -d "$tmp" || { echo "[ERROR] 缺少 unzip"; rm -rf "$tmp"; return 1; } ;;
-    *)         echo "[ERROR] 未知包格式：$url"; rm -rf "$tmp"; return 1 ;;
+    *.tar.xz)
+      ensure_archiver || { echo "[ERROR] 缺少解压工具（tar/xz），且获取 busybox 失败"; rm -rf "$tmp"; return 1; }
+      if command -v tar >/dev/null 2>&1 && command -v xz >/dev/null 2>&1; then
+        tar -xJf "$pkg" -C "$tmp"
+      elif [ -n "${BB:-}" ] && [ -x "$BB" ]; then
+        "$BB" xz -dc "$pkg" | "$BB" tar -x -C "$tmp"
+      else
+        echo "[ERROR] 无法解压 .tar.xz 包"; rm -rf "$tmp"; return 1
+      fi
+      ;;
+    *.tar.gz)
+      ensure_archiver || { echo "[ERROR] 缺少解压工具（tar/gzip），且获取 busybox 失败"; rm -rf "$tmp"; return 1; }
+      extract_tgz "$pkg" "$tmp" || { echo "[ERROR] 解压失败"; rm -rf "$tmp"; return 1; }
+      ;;
+    *.zip)
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -q "$pkg" -d "$tmp" || { echo "[ERROR] 解压 zip 失败"; rm -rf "$tmp"; return 1; }
+      elif [ -n "${BB:-}" ] && [ -x "$BB" ]; then
+        "$BB" unzip "$pkg" -d "$tmp" || { echo "[ERROR] busybox 解压 zip 失败"; rm -rf "$tmp"; return 1; }
+      else
+        echo "[ERROR] 缺少 unzip（或 busybox unzip）"; rm -rf "$tmp"; return 1
+      fi
+      ;;
+    *)
+      echo "[ERROR] 未知包格式：$url"; rm -rf "$tmp"; return 1
+      ;;
   esac
 
-  fn="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  # 安装可执行文件
+  fn="$(find "$tmp" -type f -name 'sing-box' -perm -u+x | head -n1)"
   [ -n "$fn" ] || { echo "[ERROR] 包内未找到 sing-box"; rm -rf "$tmp"; return 1; }
 
-  install -m 0755 "$fn" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+  install -m0755 "$fn" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
   echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
+
 
 # 证书兜底（有 openssl 就生成；没有就先跳过，由业务决定是否强制）
 ensure_tls_cert() {
