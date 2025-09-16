@@ -3,7 +3,7 @@
 开箱即用 18 个节点（直连 9 + WARP 9），含端口一键切换、BBR 加速、分享链接导出等。
 
 * ✅ 已适配 **sing-box v1.12.x**
-* ✅ 支持 ​**WARP 出站**​（自动生成/修复 wgcf 配置，Reserved 缺失自动回退 `0,0,0`）
+* ✅ 支持 ​**WARP 出站**​（自动生成/修复 wgcf 配置）
 * ✅ 一键生成证书（自签），一键 systemd 托管
 * ✅ **更换端口**后自动重写配置与放行
 * ✅ 分享链接分组打印（直连 9 / WARP 9），导入即用
@@ -27,12 +27,7 @@
 
 ​**WARP 9：**（同上 9 种，出站经 Cloudflare WARP）
 
-> WARP 出站更利于流媒体解锁与回程质量。脚本自动：
-> 
-> * 安装 `wgcf` → 注册/生成 profile
-> * 提取 `PrivateKey / PublicKey / Endpoint / Address / Reserved` 并**去引号/去 CR/去空格**
-> * Reserved 缺失自动用 `0,0,0` 回退
-> * 解析域名 Endpoint → 直连 IP，减少 DNS 依赖
+> WARP 出站更利于流媒体解锁与回程质量。
 
 ---
 
