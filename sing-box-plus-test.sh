@@ -264,21 +264,53 @@ sbp_install_prereqs_pm() {
   return 0
 }
 
+# 把 GOARCH 映射为你 Release 中的资产文件名
+pick_mirror_asset() {
+  case "$1" in
+    amd64)         echo "sing-box-amd64" ;;
+    arm64)         echo "sing-box-arm64" ;;
+    armv7)         echo "sing-box-armv7" ;;
+    386)           echo "sing-box-386" ;;
+    386-softfloat) echo "sing-box-386-softfloat" ;; # 老设备/软浮点时可用
+    *)             echo "" ;;
+  esac
+}
+
 # —— 二进制模式：直接获取 sing-box 可执行文件 —— #
+# —— 二进制模式：优先你的镜像，失败再回退官方 —— #
 install_singbox_binary() {
-  local goarch pkg tmp json url fn
+  local goarch tmp asset url pkg fn json
+
   goarch="$(detect_goarch)"
   tmp="$(mktemp -d)" || return 1
+  pkg="$tmp/pkg"
 
-  # 需要 jq 解析 GitHub API
+  # 1) 先试你的 Release 直链（无需 jq，速度快）
+  if [ -n "${SBP_BIN_MIRROR:-}" ]; then
+    asset="$(pick_mirror_asset "$goarch")"
+    if [ -n "$asset" ]; then
+      url="${SBP_BIN_MIRROR}/${SBP_BIN_TAG}/${asset}"
+      if with_retry 3 dl "$url" "$pkg"; then
+        install -m0755 "$pkg" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+        rm -rf "$tmp"
+        echo "[OK] 已从镜像安装 sing-box → $SBP_BIN_DIR/sing-box"
+        return 0
+      else
+        echo "[WARN] 镜像直链下载失败，回退官方 release。"
+      fi
+    else
+      echo "[WARN] 未识别到镜像资产（arch=$goarch），回退官方 release。"
+    fi
+  fi
+
+  # 2) 回落到官方 SagerNet/sing-box 的 release 解析（需要 jq）
   ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
 
-  # 获取最新 release
   json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 20 \
-          https://api.github.com/repos/SagerNet/sing-box/releases/latest)" \
-        || { rm -rf "$tmp"; return 1; }
+         https://api.github.com/repos/SagerNet/sing-box/releases/latest)" \
+       || { rm -rf "$tmp"; return 1; }
 
-  # 取对应架构的下载地址（优先 tar.gz / tar.xz / zip）
+  # 挑匹配架构的 tar 包（tar.gz / tar.xz / zip）
   url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
     .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
   ' | head -n1)"
@@ -288,7 +320,6 @@ install_singbox_binary() {
   fi
 
   # 下载包
-  pkg="$tmp/pkg"
   with_retry 3 dl "$url" "$pkg" || { rm -rf "$tmp"; return 1; }
 
   # 解压：无 tar/gzip/xz 时自动 busybox 兜底
@@ -303,7 +334,7 @@ install_singbox_binary() {
         echo "[ERROR] 无法解压 .tar.xz 包"; rm -rf "$tmp"; return 1
       fi
       ;;
-    *.tar.gz)
+    *.tar.gz|*.tgz)
       ensure_archiver || { echo "[ERROR] 缺少解压工具（tar/gzip），且获取 busybox 失败"; rm -rf "$tmp"; return 1; }
       extract_tgz "$pkg" "$tmp" || { echo "[ERROR] 解压失败"; rm -rf "$tmp"; return 1; }
       ;;
@@ -394,6 +425,9 @@ SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
 BIN_PATH=${BIN_PATH:-/usr/local/bin/sing-box}
 SB_DIR=${SB_DIR:-/opt/sing-box}
 CONF_JSON=${CONF_JSON:-$SB_DIR/config.json}
+# —— mirror 配置（你自己的 Release）——
+: "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
+: "${SBP_BIN_TAG:=v1.12.8}"     # 你当前发布的 tag；后续更换版本只改这里即可
 DATA_DIR=${DATA_DIR:-$SB_DIR/data}
 CERT_DIR=${CERT_DIR:-$SB_DIR/cert}
 WGCF_DIR=${WGCF_DIR:-$SB_DIR/wgcf}
