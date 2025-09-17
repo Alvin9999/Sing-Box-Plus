@@ -59,6 +59,32 @@ net_apply_ip_mode() {
   fi
 }
 
+# A. 让包管理器安静（一次性）
+pm_quiet_init() {
+  systemctl stop  dnf-makecache.service dnf-makecache.timer 2>/dev/null || true
+  systemctl disable dnf-makecache.timer                         >/dev/null 2>&1 || true
+  systemctl stop  packagekit 2>/dev/null || true
+  systemctl mask  packagekit >/dev/null 2>&1 || true
+}
+
+# B. 有限时等待（确实要用包管理器时才等）
+pm_wait_unlock() {
+  [[ "${SBP_BIN_ONLY:-0}" = "1" || "${SBP_SKIP_DEPS:-0}" = "1" ]] && return 0
+  local timeout=${1:-120} waited=0 printed=""
+  while pgrep -x dnf >/dev/null || pgrep -f '/usr/bin/yum' >/dev/null; do
+    [[ -z $printed ]] && { echo "[INFO] 包管理器正忙，等待释放锁..."; printed=1; }
+    ps -o pid,etimes,cmd -C dnf 2>/dev/null || true
+    pgrep -a -f '/usr/bin/yum' 2>/dev/null || true
+    sleep 3; waited=$((waited+3))
+    if (( waited >= timeout )); then
+      echo "[WARN] 等待 ${timeout}s 仍未释放，将尝试停止后台 yum/dnf"
+      pkill -TERM -x dnf; pkill -TERM -f '/usr/bin/yum'; sleep 3
+      pkill -KILL -x dnf; pkill -KILL -f '/usr/bin/yum' || true
+      break
+    fi
+  done
+}
+
 map_singbox_asset() {  # 输入 goarch，输出仓库里的文件名
   case "$1" in
     amd64) echo "sing-box-amd64" ;;
@@ -230,14 +256,24 @@ CONF
 
 # 刷新软件仓（含各系兜底）
 sbp_pm_refresh() {
-  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && { echo "[INFO] 已跳过包管理器刷新（SBP_SKIP_DEPS=1）"; return 0; }
-  pm_quiet     # 第 3 步里会给出这个函数
+  # 二进制模式/跳过依赖时，直接退出（可保留提示）
+  if [ "${SBP_SKIP_DEPS:-1}" = "1" ] || [ "${SBP_BIN_ONLY:-0}" = "1" ]; then
+    echo "[INFO] 已跳过包管理器刷新（SBP_SKIP_DEPS=1 或 SBP_BIN_ONLY=1）"
+    return 0
+  fi
+
+  pm_quiet_init          # A：一次性关闭 dnf-makecache / packagekit 等后台噪音
+  pm_wait_unlock 120     # B：等后台 dnf/yum 释放锁（CentOS9 关键），超时会温柔 kill
+
   case "$PM" in
-    apt) with_retry 3 apt-get -y update || true ;;
-    dnf) with_retry 3 dnf -y --setopt=install_weak_deps=False makecache || true ;;
-    yum) with_retry 3 yum -y makecache fast || true ;;
+    apt)    with_retry 3 apt-get -y update || true ;;
+    dnf)    with_retry 3 dnf -y --setopt=install_weak_deps=False makecache || true ;;
+    yum)    with_retry 3 yum -y makecache fast || true ;;
+    zypper) with_retry 3 zypper -n ref || true ;;
+    pacman) with_retry 3 pacman -Syy --noconfirm || true ;;
   esac
 }
+
 
 sbp_pm_install() {
   [ "${SBP_SKIP_DEPS:-1}" = "1" ] && { echo "[INFO] 已跳过安装依赖（SBP_SKIP_DEPS=1）：$*"; return 0; }
@@ -384,8 +420,11 @@ sbp_mark_deps_ok() {
   fi
 }
 
+
+
 # 入口：装依赖 / 二进制回退
 sbp_bootstrap() {
+ pm_quiet_init 
   [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
   # 【新增】3 秒快速探测 v6 → 统一应用到 curl/wget/apt/yum 等
