@@ -356,50 +356,25 @@ pick_mirror_asset() {
 }
 
 # —— 二进制模式：优先镜像，失败再回退官方 —— #
+# 放在脚本里的 install_singbox_binary()，不需要 jq
 install_singbox_binary() {
-  local goa fn url tmp
+  local goa fn url tmp="/tmp/sb.$$"
+  case "$(uname -m)" in
+    x86_64)   goa=amd64 ;;
+    aarch64)  goa=arm64 ;;
+    armv7l)   goa=armv7 ;;
+    i386|i686)goa=386 ;;
+    *) echo "[ERROR] unsupported arch: $(uname -m)"; return 1 ;;
+  esac
 
-  goa="$(detect_goarch)" || { echo "[ERROR] 无法识别架构"; return 1; }
-  fn="$(map_singbox_asset "$goa")"  || { echo "[ERROR] 不支持架构: $goa"; return 1; }
+  # 的镜像（前面已经在脚本顶部设了 SBP_BIN_MIRROR / SBP_BIN_VER）
+  url="${SBP_BIN_MIRROR}/${SBP_BIN_VER}/sing-box-${goa}"
 
-  tmp="$(mktemp -d)" || return 1
-
-  # 1) 先走镜像（不需要 jq / 包管理器）
-  url="$SBP_BIN_MIRROR/$SBP_BIN_VER/$fn"
-  if with_retry 2 dl "$url" "$tmp/sing-box"; then
-    :
-  else
-    echo "[WARN] 镜像获取失败，尝试官方 Release 直连（无需 jq）"
-
-    # 2) 官方回退：下载 tar.gz 解出可执行文件，同样不需要 jq
-    #    官方命名：sing-box-1.12.8-linux-amd64.tar.gz 等
-    local ver_nov="${SBP_BIN_VER#v}" osarch
-    case "$goa" in
-      amd64) osarch="linux-amd64" ;;
-      arm64) osarch="linux-arm64" ;;
-      armv7) osarch="linux-armv7" ;;
-      386)   osarch="linux-386"   ;;
-      *)     rm -rf "$tmp"; echo "[ERROR] 不支持架构: $goa"; return 1 ;;
-    esac
-
-    local tgz="https://github.com/SagerNet/sing-box/releases/download/v${ver_nov}/sing-box-${ver_nov}-${osarch}.tar.gz"
-    if ! with_retry 2 dl "$tgz" "$tmp/sb.tgz"; then
-      rm -rf "$tmp"; echo "[ERROR] 无法下载 sing-box 二进制"; return 1
-    fi
-
-    # 解包（需要 tar；CentOS/Ubuntu/Arch 都有，极简系统再考虑 busybox）
-    mkdir -p "$tmp/unpack"
-    tar -xzf "$tmp/sb.tgz" -C "$tmp/unpack" || { rm -rf "$tmp"; echo "[ERROR] 解包失败"; return 1; }
-
-    local bin
-    bin="$(find "$tmp/unpack" -type f -name 'sing-box' | head -n1)"
-    [ -n "$bin" ] || { rm -rf "$tmp"; echo "[ERROR] 包内未找到 sing-box"; return 1; }
-    cp -f "$bin" "$tmp/sing-box"
-  fi
-
-  install -m0755 "$tmp/sing-box" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
-  rm -rf "$tmp"
-  echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
+  echo "[INFO] fetch: $url"
+  curl -L -4 --connect-timeout 8 --retry 3 -o "$tmp" "$url" || { echo "[ERROR] download fail"; return 1; }
+  install -m 0755 "$tmp" /usr/local/bin/sing-box || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  echo "[OK] sing-box -> /usr/local/bin/sing-box"
 }
 
 
