@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.4.6
+#  Version: v3.0.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -18,6 +18,13 @@ stty erase ^H # 让退格键在终端里正常工作
 : "${SBP_ROOT:=/var/lib/sing-box-plus}"
 : "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
 : "${SBP_DEPS_SENTINEL:=/var/lib/sing-box-plus/.deps_ok}"
+
+# —— 二进制来源与轻量模式开关 —— #
+: "${SBP_BIN_CHANNEL:=official}"   # official|alvin|auto|custom
+: "${SBP_BIN_VERSION:=}"           # 例如 v1.12.8；留空=latest
+: "${SBP_BIN_URL:=}"               # 当 channel=custom 时使用的直链
+: "${SBP_LITE:=0}"                 # 1=轻量模式（少依赖，优先单文件）
+: "${SBP_386_SOFT:=0}"             # 1=强制使用 386-softfloat 资产
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -209,6 +216,66 @@ install_singbox_binary() {
   echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
 
+
+# —— 从 Alvin9999/singbox-bins 获取「单文件」二进制 —— #
+install_singbox_binary_alvin() {
+  local arch out url base="https://github.com/Alvin9999/singbox-bins/releases"
+  out="${SBP_BIN_DIR:-/var/lib/sing-box-plus/bin}/sing-box"
+
+  # 架构映射（含 386-softfloat/armv7）
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    armv7l|armv7)  arch=armv7 ;;
+    i386|i686)     arch=386 ;;
+    *)             arch=amd64 ;;
+  esac
+
+  # 32 位软浮点探测/强制
+  if [ "$arch" = 386 ]; then
+    if [ "${SBP_386_SOFT:-0}" = 1 ] || ! grep -qi ' fpu ' /proc/cpuinfo 2>/dev/null; then
+      arch="386-softfloat"
+    fi
+  fi
+
+  # 版本：latest 或指定 tag
+  if [ -n "${SBP_BIN_VERSION:-}" ]; then
+    url="$base/download/${SBP_BIN_VERSION}/sing-box-${arch}"
+  else
+    url="$base/latest/download/sing-box-${arch}"
+  fi
+
+  with_retry 3 dl "$url" "$out" || { echo "[ERROR] 下载失败: $url"; return 1; }
+  chmod +x "$out" || return 1
+  echo "[OK] 已安装 sing-box 到 $out (alvin)"
+}
+
+# —— 统一入口：根据开关选择安装来源 —— #
+install_singbox_binary_entry() {
+  case "${SBP_BIN_CHANNEL:-official}" in
+    alvin)
+      install_singbox_binary_alvin || install_singbox_binary
+      ;;
+    custom)
+      [ -n "${SBP_BIN_URL:-}" ] || { echo "[ERROR] SBP_BIN_URL 未设置"; return 1; }
+      with_retry 3 dl "$SBP_BIN_URL" "${SBP_BIN_DIR:-/var/lib/sing-box-plus/bin}/sing-box" || return 1
+      chmod +x "${SBP_BIN_DIR:-/var/lib/sing-box-plus/bin}/sing-box" || return 1
+      ;;
+    auto)
+      # 缺少 jq/tar/unzip 或显式轻量模式 -> 先走单文件；否则走官方
+      if command -v tar >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ "${SBP_LITE:-0}" != 1 ]; then
+        install_singbox_binary || install_singbox_binary_alvin
+      else
+        install_singbox_binary_alvin || install_singbox_binary
+      fi
+      ;;
+    *)
+      # official（默认）
+      install_singbox_binary || install_singbox_binary_alvin
+      ;;
+  esac
+}
+
 # 证书兜底（有 openssl 就生成；没有就先跳过，由业务决定是否强制）
 ensure_tls_cert() {
   local dir="$SBP_ROOT"
@@ -244,7 +311,7 @@ sbp_bootstrap() {
   # 强制二进制模式
   if [ "$SBP_BIN_ONLY" = 1 ]; then
     echo "[INFO] 二进制模式（SBP_BIN_ONLY=1）"
-    install_singbox_binary || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
+    install_singbox_binary_entry || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
     ensure_tls_cert
     return 0
   fi
@@ -257,9 +324,10 @@ sbp_bootstrap() {
 
   # 回退到二进制模式
   echo "[WARN] 包管理器依赖安装失败，切换到二进制模式"
-  install_singbox_binary || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
+  install_singbox_binary_entry || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
   ensure_tls_cert
 }
+
 # ===== [END] SBP 引导模块 v2.2.0+ =====
 
 
@@ -286,7 +354,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.4.6"
+SCRIPT_VERSION="v3.0.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
