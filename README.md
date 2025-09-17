@@ -55,7 +55,7 @@ curl -fsSL -o sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999/Sing-
 ## 🧭 功能菜单
 
 ```text
- 🚀 Sing-Box-Plus 管理脚本 v2.3.0 🚀
+ 🚀 Sing-Box-Plus 管理脚本 v2.4.5 🚀
  脚本更新地址: https://github.com/Alvin9999/Sing-Box-Plus
 =============================================================
 系统加速状态：已启用 / 未启用 BBR
@@ -77,7 +77,7 @@ Sing-Box 启动状态：运行中 / 未运行 / 未安装
 
 | 版本    | 日期     | 变更 |
 |--------|----------|------|
-| v2.3.0 | 2025-09 | - 提高系统兼容性和安装速度。 |
+| v2.4.5 | 2025-09 | - 提高系统兼容性和安装速度。 |
 
 
 ---
