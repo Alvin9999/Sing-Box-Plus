@@ -52,7 +52,7 @@ net_pick_ip_mode() {
 net_apply_ip_mode() {
   CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
   if [ "${SBP_IPV4:-0}" = 1 ]; then
-    CURLX+=(--ipv4)
+    CURLX+=(-4)
     WGETX+=(-4)
     APT_OPTS='-o Acquire::ForceIPv4=true'
     YUMDNF_OPTS+=(--setopt=ip_resolve=4)
