@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.4.2
+#  Version: v2.3.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -24,9 +24,8 @@ stty erase ^H 2>/dev/null || true
 : "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
 : "${SBP_DEPS_SENTINEL:=${SBP_ROOT}/.deps_ok}"
 
-# 全局基础参数（命令 + 通用选项）——不要在这里写 -4，是否加 -4 由 net_apply_ip_mode 决定
-CURLX=(curl -fsSL --connect-timeout 8 --retry 3)
-WGETX=(wget -q   --timeout=8       --tries=3)
+# 统一用 IPv4 访问 GitHub，避免 IPv6 “No route to host” 耗时
+CURLX=(curl -fsSL -4 --connect-timeout 8 --retry 3)
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -51,11 +50,9 @@ net_pick_ip_mode() {
 
 # 把选好的 IP 策略“应用”为全局选项（供 dl/apt/yum/dnf 统一使用）
 net_apply_ip_mode() {
-  APT_OPTS=""
-  YUMDNF_OPTS=()
-
-  if [ "${SBP_IPV4:-1}" = "1" ]; then
-    CURLX+=(-4)
+  CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
+  if [ "${SBP_IPV4:-0}" = 1 ]; then
+    CURLX+=(--ipv4)
     WGETX+=(-4)
     APT_OPTS='-o Acquire::ForceIPv4=true'
     YUMDNF_OPTS+=(--setopt=ip_resolve=4)
@@ -359,25 +356,50 @@ pick_mirror_asset() {
 }
 
 # —— 二进制模式：优先镜像，失败再回退官方 —— #
-# 放在脚本里的 install_singbox_binary()，不需要 jq
 install_singbox_binary() {
-  local goa fn url tmp="/tmp/sb.$$"
-  case "$(uname -m)" in
-    x86_64)   goa=amd64 ;;
-    aarch64)  goa=arm64 ;;
-    armv7l)   goa=armv7 ;;
-    i386|i686)goa=386 ;;
-    *) echo "[ERROR] unsupported arch: $(uname -m)"; return 1 ;;
-  esac
+  local goa fn url tmp
 
-  # 的镜像（前面已经在脚本顶部设了 SBP_BIN_MIRROR / SBP_BIN_VER）
-  url="${SBP_BIN_MIRROR}/${SBP_BIN_VER}/sing-box-${goa}"
+  goa="$(detect_goarch)" || { echo "[ERROR] 无法识别架构"; return 1; }
+  fn="$(map_singbox_asset "$goa")"  || { echo "[ERROR] 不支持架构: $goa"; return 1; }
 
-  echo "[INFO] fetch: $url"
-  curl -L -4 --connect-timeout 8 --retry 3 -o "$tmp" "$url" || { echo "[ERROR] download fail"; return 1; }
-  install -m 0755 "$tmp" /usr/local/bin/sing-box || { rm -f "$tmp"; return 1; }
-  rm -f "$tmp"
-  echo "[OK] sing-box -> /usr/local/bin/sing-box"
+  tmp="$(mktemp -d)" || return 1
+
+  # 1) 先走镜像（不需要 jq / 包管理器）
+  url="$SBP_BIN_MIRROR/$SBP_BIN_VER/$fn"
+  if with_retry 2 dl "$url" "$tmp/sing-box"; then
+    :
+  else
+    echo "[WARN] 镜像获取失败，尝试官方 Release 直连（无需 jq）"
+
+    # 2) 官方回退：下载 tar.gz 解出可执行文件，同样不需要 jq
+    #    官方命名：sing-box-1.12.8-linux-amd64.tar.gz 等
+    local ver_nov="${SBP_BIN_VER#v}" osarch
+    case "$goa" in
+      amd64) osarch="linux-amd64" ;;
+      arm64) osarch="linux-arm64" ;;
+      armv7) osarch="linux-armv7" ;;
+      386)   osarch="linux-386"   ;;
+      *)     rm -rf "$tmp"; echo "[ERROR] 不支持架构: $goa"; return 1 ;;
+    esac
+
+    local tgz="https://github.com/SagerNet/sing-box/releases/download/v${ver_nov}/sing-box-${ver_nov}-${osarch}.tar.gz"
+    if ! with_retry 2 dl "$tgz" "$tmp/sb.tgz"; then
+      rm -rf "$tmp"; echo "[ERROR] 无法下载 sing-box 二进制"; return 1
+    fi
+
+    # 解包（需要 tar；CentOS/Ubuntu/Arch 都有，极简系统再考虑 busybox）
+    mkdir -p "$tmp/unpack"
+    tar -xzf "$tmp/sb.tgz" -C "$tmp/unpack" || { rm -rf "$tmp"; echo "[ERROR] 解包失败"; return 1; }
+
+    local bin
+    bin="$(find "$tmp/unpack" -type f -name 'sing-box' | head -n1)"
+    [ -n "$bin" ] || { rm -rf "$tmp"; echo "[ERROR] 包内未找到 sing-box"; return 1; }
+    cp -f "$bin" "$tmp/sing-box"
+  fi
+
+  install -m0755 "$tmp/sing-box" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
 
 
@@ -405,10 +427,9 @@ sbp_bootstrap() {
  pm_quiet_init 
   [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
-  # 先探测，再应用
-  net_pick_ip_mode       # 设置 SBP_IPV4=1/0
-  net_apply_ip_mode      # 依据 SBP_IPV4 给 CURLX/WGETX/包管理器 追加 IPv4 选项
-
+  # 【新增】3 秒快速探测 v6 → 统一应用到 curl/wget/apt/yum 等
+  net_pick_ip_mode
+  net_apply_ip_mode
   
   if [ "$SBP_SKIP_DEPS" = 1 ]; then
     echo "[INFO] 已跳过启动时依赖检查（SBP_SKIP_DEPS=1）"
@@ -469,7 +490,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.4.2"
+SCRIPT_VERSION="v2.3.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -844,15 +865,71 @@ install_deps(){
   apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
 
-# ===== 安装 / 更新 sing-box（只走二进制）=====
+# ===== 安装 / 更新 sing-box（GitHub Releases）=====
 install_singbox() {
+
   # 已安装则直接返回
   if command -v "$BIN_PATH" >/dev/null 2>&1; then
     info "检测到 sing-box: $("$BIN_PATH" version | head -n1)"
     return 0
   fi
 
-  install_singbox_binary   # 就这一句
+  # 依赖
+  ensure_deps curl jq tar || return 1
+  command -v xz >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
+  command -v unzip >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
+
+  local repo="SagerNet/sing-box"
+  local tag="${SINGBOX_TAG:-latest}"   # 允许用环境变量固定版本，如 v1.12.7
+  local arch; arch="$(arch_map)"
+  local api url tmp pkg re rel_url
+
+  info "下载 sing-box (${arch}) ..."
+
+  # 取 release JSON
+  if [[ "$tag" = "latest" ]]; then
+    rel_url="https://api.github.com/repos/${repo}/releases/latest"
+  else
+    rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+  fi
+
+  # 资产名匹配：兼容 tar.gz / tar.xz / zip
+  # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
+  re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
+
+  # 先在目标 release 里找；找不到再从所有 releases 里兜底
+  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
+  if [[ -z "$url" ]]; then
+    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
+           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
+  fi
+  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+
+
+  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
+  if ! curl -fL "$url" -o "$pkg"; then
+    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
+  fi
+
+  # 解压
+  if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
+    tar -xzf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.tar\.xz$'; then
+    tar -xJf "$pkg" -C "$tmp"
+  elif echo "$url" | grep -qE '\.zip$'; then
+    unzip -q "$pkg" -d "$tmp"
+  else
+    rm -rf "$tmp"; err "未知包格式：$url"; return 1
+  fi
+
+  # 找到二进制并安装
+  local bin
+  bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
+  [[ -n "$bin" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
+
+  install -m 0755 "$bin" "$BIN_PATH"
+  rm -rf "$tmp"
+  info "安装完成：$("$BIN_PATH" version | head -n1)"
 }
 
 # ===== systemd =====
