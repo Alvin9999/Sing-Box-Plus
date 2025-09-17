@@ -102,7 +102,8 @@ map_singbox_asset() {  # 输入 goarch，输出仓库里的文件名
 dl() {  # 用法：dl <URL> <OUT_PATH>
   local url="$1" out="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 --retry 2 -o "$out" "$url" && return 0
+    "${CURLX[@]}" --connect-timeout 4 --max-time 15 --retry 2 -o "$out" "$url" && return 0
+
   fi
   if command -v wget >/dev/null 2>&1; then
     timeout 15 wget "${WGETX[@]}" -qO "$out" --tries=2 --timeout=8 "$url" && return 0
@@ -187,9 +188,9 @@ _dl_jq_static() {
     *) fn="jq-linux64" ;;
   esac
   # 两个源轮询（都走 IPv4 + 短超时）
-  with_retry 3 curl "${CURLX[@]}" -fsSL \
+with_retry 3 "${CURLX[@]}" \
     "https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
-  || with_retry 3 curl "${CURLX[@]}" -fsSL \
+|| with_retry 3 "${CURLX[@]}" \
     "https://ghproxy.com/https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
   || return 1
   chmod +x "$dest"
@@ -549,9 +550,10 @@ safe_source_env(){ # 安全 source，忽略不存在文件
 
 get_ip(){  # 多源获取公网IP
   local ip
-  ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
-  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
-  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ip.sb || true)
+ip=$("${CURLX[@]}" --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
+[[ -z "$ip" ]] && ip=$("${CURLX[@]}" --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
+[[ -z "$ip" ]] && ip=$("${CURLX[@]}" --connect-timeout 3 --max-time 5 https://ip.sb || true)
+
   echo "${ip:-127.0.0.1}"
 }
 
@@ -747,7 +749,7 @@ install_wgcf() {
   fi
 
   # 取最新发布信息（跟随 IPv4/IPv6 策略，短超时 + 重试）
-  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
+  json="$(with_retry 3"${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
           https://api.github.com/repos/ViRb3/wgcf/releases/latest)" || true
 
   # 从 assets 中挑出 linux_${GOA} 结尾的下载地址
