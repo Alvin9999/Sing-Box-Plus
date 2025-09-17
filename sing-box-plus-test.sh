@@ -50,8 +50,8 @@ net_pick_ip_mode() {
 
 # 把选好的 IP 策略“应用”为全局选项（供 dl/apt/yum/dnf 统一使用）
 net_apply_ip_mode() {
-  CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
-  if [ "${SBP_IPV4:-0}" = 1 ]; then
+  APT_OPTS="" YUMDNF_OPTS=()
+  if [ "${SBP_IPV4:-1}" = "1" ]; then
     CURLX+=(-4)
     WGETX+=(-4)
     APT_OPTS='-o Acquire::ForceIPv4=true'
