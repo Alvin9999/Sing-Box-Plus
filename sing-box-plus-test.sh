@@ -840,7 +840,7 @@ install_deps(){
   apt-get install -y ca-certificates curl wget jq tar iproute2 openssl coreutils uuid-runtime >/dev/null 2>&1 || true
 }
 
-# ===== 安装 / 更新 sing-box（GitHub Releases）=====
+# ===== 安装 / 更新 sing-box（先二进制，失败再回退）=====
 install_singbox() {
 
   # 已安装则直接返回
@@ -849,10 +849,21 @@ install_singbox() {
     return 0
   fi
 
-  # 依赖
+  # 1) 先尝试你自己的二进制直装
+  if install_singbox_binary; then
+    return 0
+  fi
+
+  # 如果强制只走二进制（推荐默认），就直接报错返回
+  if [ "${SBP_BIN_ONLY:-1}" = "1" ]; then
+    err "二进制直装失败（SBP_BIN_ONLY=1），已停止。"
+    return 1
+  fi
+
+  # 2) 允许回退：再走旧的 GitHub Releases 方案（需要 jq/tar/unzip）
   ensure_deps curl jq tar || return 1
-  command -v xz >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
-  command -v unzip >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
+  command -v xz     >/dev/null 2>&1 || ensure_deps xz-utils >/dev/null 2>&1 || true
+  command -v unzip  >/dev/null 2>&1 || ensure_deps unzip   >/dev/null 2>&1 || true
 
   local repo="SagerNet/sing-box"
   local tag="${SINGBOX_TAG:-latest}"   # 允许用环境变量固定版本，如 v1.12.7
@@ -861,32 +872,28 @@ install_singbox() {
 
   info "下载 sing-box (${arch}) ..."
 
-  # 取 release JSON
   if [[ "$tag" = "latest" ]]; then
     rel_url="https://api.github.com/repos/${repo}/releases/latest"
   else
     rel_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
   fi
 
-  # 资产名匹配：兼容 tar.gz / tar.xz / zip
-  # 典型名称：sing-box-1.12.7-linux-amd64.tar.gz
   re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
 
-  # 先在目标 release 里找；找不到再从所有 releases 里兜底
-  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
-  if [[ -z "$url" ]]; then
-    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
-           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
+  url="$("${CURLX[@]}" "$rel_url" \
+        | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' \
+        | head -n1)"
+  if [[ -z "$url" || "$url" = "null" ]]; then
+    url="$("${CURLX[@]}" "https://api.github.com/repos/${repo}/releases" \
+          | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
   fi
-  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
-
+  [[ -n "$url" && "$url" != "null" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
 
   tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
-  if ! curl -fL "$url" -o "$pkg"; then
+  if ! "${CURLX[@]}" -L -o "$pkg" "$url"; then
     rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
   fi
 
-  # 解压
   if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
     tar -xzf "$pkg" -C "$tmp"
   elif echo "$url" | grep -qE '\.tar\.xz$'; then
@@ -897,7 +904,6 @@ install_singbox() {
     rm -rf "$tmp"; err "未知包格式：$url"; return 1
   fi
 
-  # 找到二进制并安装
   local bin
   bin="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
   [[ -n "$bin" ]] || { rm -rf "$tmp"; err "解压失败：未找到 sing-box 可执行文件"; return 1; }
