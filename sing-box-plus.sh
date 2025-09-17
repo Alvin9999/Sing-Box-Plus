@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.3.0
+#  Version: v2.4.5
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -101,14 +101,17 @@ map_singbox_asset() {  # 输入 goarch，输出仓库里的文件名
 # 工具：下载器 + 轻量重试
 dl() {  # 用法：dl <URL> <OUT_PATH>
   local url="$1" out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 --retry 2 -o "$out" "$url" && return 0
-  fi
-  if command -v wget >/dev/null 2>&1; then
-    timeout 15 wget "${WGETX[@]}" -qO "$out" --tries=2 --timeout=8 "$url" && return 0
-  fi
-  echo "[ERROR] 缺少可用下载器"; return 1
+
+  # 先试 CURLX（里面已含 curl 和基础参数，不要再写 curl / -fsSL）
+  "${CURLX[@]}" --connect-timeout 4 --max-time 15 -o "$out" "$url" && return 0
+
+  # 失败回退到 WGETX
+  "${WGETX[@]}" -O "$out" "$url" && return 0
+
+  echo "[ERROR] 下载失败：$url" >&2
+  return 1
 }
+
 
 with_retry() { local n=${1:-3}; shift; local i=1; until "$@"; do [ $i -ge "$n" ] && return 1; sleep $((i*2)); i=$((i+1)); done; }
 
@@ -187,9 +190,9 @@ _dl_jq_static() {
     *) fn="jq-linux64" ;;
   esac
   # 两个源轮询（都走 IPv4 + 短超时）
-  with_retry 3 curl "${CURLX[@]}" -fsSL \
+  with_retry 3  "${CURLX[@]}" -fsSL \
     "https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
-  || with_retry 3 curl "${CURLX[@]}" -fsSL \
+  || with_retry 3  "${CURLX[@]}" -fsSL \
     "https://ghproxy.com/https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
   || return 1
   chmod +x "$dest"
@@ -493,7 +496,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.3.0"
+SCRIPT_VERSION="v2.4.5"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -574,9 +577,9 @@ safe_source_env(){ # 安全 source，忽略不存在文件
 
 get_ip(){  # 多源获取公网IP
   local ip
-  ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
-  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
-  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ip.sb || true)
+  ip=$( "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
+  [[ -z "$ip" ]] && ip=$( "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
+  [[ -z "$ip" ]] && ip=$( "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ip.sb || true)
   echo "${ip:-127.0.0.1}"
 }
 
@@ -772,7 +775,7 @@ install_wgcf() {
   fi
 
   # 取最新发布信息（跟随 IPv4/IPv6 策略，短超时 + 重试）
-  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
+  json="$(with_retry 3  "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
           https://api.github.com/repos/ViRb3/wgcf/releases/latest)" || true
 
   # 从 assets 中挑出 linux_${GOA} 结尾的下载地址
@@ -901,18 +904,23 @@ install_singbox() {
   re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
 
   # 先在目标 release 里找；找不到再从所有 releases 里兜底
-  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
-  if [[ -z "$url" ]]; then
-    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
-           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
-  fi
-  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+url="$("${CURLX[@]}" "$rel_url" \
+      | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' \
+      | head -n1)"
+if [[ -z "$url" ]]; then
+  url="$("${CURLX[@]}" "https://api.github.com/repos/${repo}/releases" \
+         | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
+fi
+[[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
 
+tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
 
-  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
-  if ! curl -fL "$url" -o "$pkg"; then
-    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
-  fi
+# 下载包（先试 CURLX，失败回退 WGETX）
+if ! with_retry 3 "${CURLX[@]}" -o "$pkg" "$url"; then
+  with_retry 3 "${WGETX[@]}" -O "$pkg" "$url" \
+    || { rm -rf "$tmp"; err "下载 sing-box 失败"; return 1; }
+fi
+
 
   # 解压
   if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
