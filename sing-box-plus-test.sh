@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.4.1
+#  Version: v2.4.2
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -24,8 +24,9 @@ stty erase ^H 2>/dev/null || true
 : "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
 : "${SBP_DEPS_SENTINEL:=${SBP_ROOT}/.deps_ok}"
 
-# 统一用 IPv4 访问 GitHub，避免 IPv6 “No route to host” 耗时
-CURLX=(curl -fsSL -4 --connect-timeout 8 --retry 3)
+# 全局基础参数（命令 + 通用选项）——不要在这里写 -4，是否加 -4 由 net_apply_ip_mode 决定
+CURLX=(curl -fsSL --connect-timeout 8 --retry 3)
+WGETX=(wget -q   --timeout=8       --tries=3)
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -50,9 +51,11 @@ net_pick_ip_mode() {
 
 # 把选好的 IP 策略“应用”为全局选项（供 dl/apt/yum/dnf 统一使用）
 net_apply_ip_mode() {
-  CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
-  if [ "${SBP_IPV4:-0}" = 1 ]; then
-    CURLX+=(--ipv4)
+  APT_OPTS=""
+  YUMDNF_OPTS=()
+
+  if [ "${SBP_IPV4:-1}" = "1" ]; then
+    CURLX+=(-4)
     WGETX+=(-4)
     APT_OPTS='-o Acquire::ForceIPv4=true'
     YUMDNF_OPTS+=(--setopt=ip_resolve=4)
@@ -402,9 +405,10 @@ sbp_bootstrap() {
  pm_quiet_init 
   [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
-  # 【新增】3 秒快速探测 v6 → 统一应用到 curl/wget/apt/yum 等
-  net_pick_ip_mode
-  net_apply_ip_mode
+  # 先探测，再应用
+  net_pick_ip_mode       # 设置 SBP_IPV4=1/0
+  net_apply_ip_mode      # 依据 SBP_IPV4 给 CURLX/WGETX/包管理器 追加 IPv4 选项
+
   
   if [ "$SBP_SKIP_DEPS" = 1 ]; then
     echo "[INFO] 已跳过启动时依赖检查（SBP_SKIP_DEPS=1）"
@@ -465,7 +469,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.4.1"
+SCRIPT_VERSION="v2.4.2"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
