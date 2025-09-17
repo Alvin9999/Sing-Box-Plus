@@ -1,39 +1,167 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.2.0
+#  Version: v2.3.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
 
 set -Eeuo pipefail
 
-stty erase ^H # 让退格键在终端里正常工作
-# ===== [BEGIN] SBP 引导模块 v2.2.0+（包管理器优先 + 二进制回退） =====
-# 模式与哨兵
-: "${SBP_SOFT:=0}"                               # 1=宽松模式（失败尽量继续），默认 0=严格
-: "${SBP_SKIP_DEPS:=0}"                          # 1=启动跳过依赖检查（只在菜单 1) 再装）
-: "${SBP_FORCE_DEPS:=0}"                         # 1=强制重新安装依赖
-: "${SBP_BIN_ONLY:=0}"                           # 1=强制走二进制模式，不用包管理器
+# 让退格键在多数终端正常工作（不存在 stty 时不报错）
+stty erase ^H 2>/dev/null || true
+
+# ===== [BEGIN] SBP 引导模块（管理器优先 + 二进制回退）=====
+
+: "${SBP_BIN_VER:=v1.12.8}"
+: "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
+: "${SBP_SOFT:=0}"                     # 1=宽松模式（失败尽量继续），默认 0=严格
+: "${SBP_BIN_ONLY:=1}"                 # 1=默认二进制模式，不用包管理器
+: "${SBP_SKIP_DEPS:=1}}"  # 默认随二进制模式一起跳过依赖检查
+: "${SBP_FORCE_DEPS:=0}"               # 1=强制重新安装依赖
+
 : "${SBP_ROOT:=/var/lib/sing-box-plus}"
 : "${SBP_BIN_DIR:=${SBP_ROOT}/bin}"
-: "${SBP_DEPS_SENTINEL:=/var/lib/sing-box-plus/.deps_ok}"
+: "${SBP_DEPS_SENTINEL:=${SBP_ROOT}/.deps_ok}"
+
+# 统一用 IPv4 访问 GitHub，避免 IPv6 “No route to host” 耗时
+CURLX=(curl -fsSL -4 --connect-timeout 8 --retry 3)
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
 
-# 工具：下载器 + 轻量重试
-dl() { # 用法：dl <URL> <OUT_PATH>
-  local url="$1" out="$2"
+# —— IPv4/IPv6 选择：auto(默认)/1(强制IPv4)/0(允许IPv6) ——
+: "${SBP_FORCE_IPV4:=auto}"   # 可用 SBP_FORCE_IPV4=1 覆盖
+
+# 3 秒快速探测 IPv6；失败就用 IPv4
+net_pick_ip_mode() {
+  # 显式指定就直接生效
+  [ "$SBP_FORCE_IPV4" = "1" ] && { SBP_IPV4=1; return; }
+  [ "$SBP_FORCE_IPV4" = "0" ] && { SBP_IPV4=0; return; }
+
+  # auto：优先试 IPv6（curl/wget 任意一个可用即可）
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 2 --connect-timeout 5 -o "$out" "$url"
+    curl -s6 --connect-timeout 3 https://api.github.com >/dev/null 2>&1 && { SBP_IPV4=0; return; }
   elif command -v wget >/dev/null 2>&1; then
-    timeout 15 wget -qO "$out" --tries=2 "$url"
-  else
-    echo "[ERROR] 缺少 curl/wget：无法下载 $url"; return 1
+    timeout 4 wget -6 -qO- https://api.github.com >/dev/null 2>&1 && { SBP_IPV4=0; return; }
+  fi
+  SBP_IPV4=1
+}
+
+# 把选好的 IP 策略“应用”为全局选项（供 dl/apt/yum/dnf 统一使用）
+net_apply_ip_mode() {
+  CURLX=() WGETX=() APT_OPTS="" YUMDNF_OPTS=()
+  if [ "${SBP_IPV4:-0}" = 1 ]; then
+    CURLX+=(--ipv4)
+    WGETX+=(-4)
+    APT_OPTS='-o Acquire::ForceIPv4=true'
+    YUMDNF_OPTS+=(--setopt=ip_resolve=4)
   fi
 }
+
+# A. 让包管理器安静（一次性）
+pm_quiet_init() {
+  systemctl stop  dnf-makecache.service dnf-makecache.timer 2>/dev/null || true
+  systemctl disable dnf-makecache.timer                         >/dev/null 2>&1 || true
+  systemctl stop  packagekit 2>/dev/null || true
+  systemctl mask  packagekit >/dev/null 2>&1 || true
+}
+
+# B. 有限时等待（确实要用包管理器时才等）
+pm_wait_unlock() {
+  [[ "${SBP_BIN_ONLY:-0}" = "1" || "${SBP_SKIP_DEPS:-0}" = "1" ]] && return 0
+  local timeout=${1:-120} waited=0 printed=""
+  while pgrep -x dnf >/dev/null || pgrep -f '/usr/bin/yum' >/dev/null; do
+    [[ -z $printed ]] && { echo "[INFO] 包管理器正忙，等待释放锁..."; printed=1; }
+    ps -o pid,etimes,cmd -C dnf 2>/dev/null || true
+    pgrep -a -f '/usr/bin/yum' 2>/dev/null || true
+    sleep 3; waited=$((waited+3))
+    if (( waited >= timeout )); then
+      echo "[WARN] 等待 ${timeout}s 仍未释放，将尝试停止后台 yum/dnf"
+      pkill -TERM -x dnf; pkill -TERM -f '/usr/bin/yum'; sleep 3
+      pkill -KILL -x dnf; pkill -KILL -f '/usr/bin/yum' || true
+      break
+    fi
+  done
+}
+
+map_singbox_asset() {  # 输入 goarch，输出仓库里的文件名
+  case "$1" in
+    amd64) echo "sing-box-amd64" ;;
+    arm64) echo "sing-box-arm64" ;;
+    armv7) echo "sing-box-armv7" ;;
+    386)   echo "sing-box-386" ;;        # 老旧 glibc 可自行切换为 sing-box-386-softfloat
+    *)     return 1 ;;
+  esac
+}
+
+# 工具：下载器 + 轻量重试
+dl() {  # 用法：dl <URL> <OUT_PATH>
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 --retry 2 -o "$out" "$url" && return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    timeout 15 wget "${WGETX[@]}" -qO "$out" --tries=2 --timeout=8 "$url" && return 0
+  fi
+  echo "[ERROR] 缺少可用下载器"; return 1
+}
+
 with_retry() { local n=${1:-3}; shift; local i=1; until "$@"; do [ $i -ge "$n" ] && return 1; sleep $((i*2)); i=$((i+1)); done; }
+
+ensure_busybox() {
+  mkdir -p "$SBP_BIN_DIR"
+  local bb="$SBP_BIN_DIR/busybox" url=""
+  case "$(uname -m)" in
+    x86_64|amd64)  url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-x86_64" ;;
+    aarch64|arm64) url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-aarch64" ;;
+    armv7l|armv7)  url="https://busybox.net/downloads/binaries/1.36.1-defconfig-multiarch/busybox-armv7l" ;;
+    *) return 1 ;;
+  esac
+  [ -x "$bb" ] || { dl "$url" "$bb" && chmod +x "$bb" || return 1; }
+  BB="$bb"
+}
+
+ensure_archiver() {
+  # 1) 系统自带最好
+  if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+    TAR="tar"; GZIP="gzip"; return 0
+  fi
+
+  # 2) 小范围尝试装（不等锁，快速失败）
+  if command -v dnf >/dev/null 2>&1; then
+    timeout 25 dnf --setopt=exit_on_lock=True install -y tar gzip xz || true
+  elif command -v yum >/dev/null 2>&1; then
+    timeout 25 yum install -y tar gzip xz || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    timeout 25 apt-get update -y $APT_OPTS || true
+    timeout 25 apt-get install -y --no-install-recommends tar gzip xz-utils || true
+  elif command -v zypper >/dev/null 2>&1; then
+    timeout 25 zypper -n in -y tar gzip xz || true
+  elif command -v pacman >/dev/null 2>&1; then
+    timeout 25 pacman -Sy --noconfirm tar gzip xz || true
+  fi
+  if command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then
+    TAR="tar"; GZIP="gzip"; return 0
+  fi
+
+  # 3) 仍不行：busybox 兜底
+  ensure_busybox || return 1
+  TAR="$BB tar"; GZIP="$BB gzip"; XZ="$BB xz"
+  export TAR GZIP XZ
+  return 0
+}
+
+extract_tgz() {  # extract_tgz <tgz> <destdir>
+  local tgz="$1" dest="$2"
+  mkdir -p "$dest"
+  if [ -n "${BB:-}" ] && [ -x "$BB" ] && ! command -v tar >/dev/null 2>&1; then
+    # 纯 busybox 情况：用 gzip -dc 管道给 tar
+    "$BB" gzip -dc "$tgz" | "$BB" tar -x -C "$dest"
+  else
+    $TAR -xzf "$tgz" -C "$dest"
+  fi
+}
 
 # 工具：架构探测 + jq 静态兜底
 detect_goarch() {
@@ -45,16 +173,60 @@ detect_goarch() {
     *)            echo amd64 ;;
   esac
 }
+# ===== jq（静态版）优先，二进制模式下绝不调包管理器 =====
+_dl_jq_static() {
+  # 只负责下载 jq 到指定位置
+  local dest="$1" fn arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) fn="jq-linux64" ;;
+    aarch64|arm64) fn="jq-linux64" ;;   # jq 只有 linux64 静态版，arm64 也可用
+    *) fn="jq-linux64" ;;
+  esac
+  # 两个源轮询（都走 IPv4 + 短超时）
+  with_retry 3 curl "${CURLX[@]}" -fsSL \
+    "https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
+  || with_retry 3 curl "${CURLX[@]}" -fsSL \
+    "https://ghproxy.com/https://github.com/jqlang/jq/releases/latest/download/${fn}" -o "$dest" \
+  || return 1
+  chmod +x "$dest"
+}
+
 ensure_jq_static() {
   command -v jq >/dev/null 2>&1 && return 0
-  local arch out="$SBP_BIN_DIR/jq" url alt
-  arch="$(detect_goarch)"
-  url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}"
-  alt="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64"
-  dl "$url" "$out" || { [ "$arch" = amd64 ] && dl "$alt" "$out" || true; }
-  chmod +x "$out" 2>/dev/null || true
-  command -v jq >/dev/null 2>&1
+
+  local a u
+  a="$(detect_goarch)"   # 函数：返回 amd64/arm64/armv7/386
+
+  case "$a" in
+    amd64) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-amd64" ;;
+    arm64) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-arm64" ;;
+    armv7) u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-armv7" ;;
+    386)   u="$SBP_BIN_MIRROR/$SBP_BIN_VER/jq-386" ;;
+    *)     u="";;
+  esac
+
+  if [ -n "$u" ] && with_retry 3 "${CURLX[@]}" -o /usr/local/bin/jq "$u"; then
+    chmod +x /usr/local/bin/jq
+    return 0
+  fi
+
+  # 可选：再尝试一次上游的 jq 静态包（不建议回退包管）
+  case "$a" in
+    amd64) u="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64" ;;
+    386)   u="https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux32" ;;
+    arm64) u="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-aarch64" ;;
+    armv7) u="" ;;
+  esac
+  if [ -n "$u" ] && with_retry 3 "${CURLX[@]}" -o /usr/local/bin/jq "$u"; then
+    chmod +x /usr/local/bin/jq
+    return 0
+  fi
+
+  echo "[ERROR] 无法获取 jq（已禁用包管理器回退）。请检查 GitHub 连接或给镜像补齐 jq-* 文件。"
+  return 1
 }
+
 
 # 工具：核心命令自检
 sbp_core_ok() {
@@ -84,66 +256,63 @@ CONF
 
 # 刷新软件仓（含各系兜底）
 sbp_pm_refresh() {
+  # 二进制模式/跳过依赖时，直接退出（可保留提示）
+  if [ "${SBP_SKIP_DEPS:-1}" = "1" ] || [ "${SBP_BIN_ONLY:-0}" = "1" ]; then
+    echo "[INFO] 已跳过包管理器刷新（SBP_SKIP_DEPS=1 或 SBP_BIN_ONLY=1）"
+    return 0
+  fi
+
+  pm_quiet_init          # A：一次性关闭 dnf-makecache / packagekit 等后台噪音
+  pm_wait_unlock 120     # B：等后台 dnf/yum 释放锁（CentOS9 关键），超时会温柔 kill
+
   case "$PM" in
-    apt)
-      apt_allow_release_change
-      sed -i 's#^deb http://#deb https://#' /etc/apt/sources.list 2>/dev/null || true
-      # 修正 bullseye 的 security 行：bullseye/updates → debian-security bullseye-security
-      sed -i -E 's#^(deb\s+https?://security\.debian\.org)(/debian-security)?\s+bullseye/updates(.*)$#\1/debian-security bullseye-security\3#' /etc/apt/sources.list
-
-      local AOPT=""
-      curl -6 -fsS --connect-timeout 2 https://deb.debian.org >/dev/null 2>&1 || AOPT='-o Acquire::ForceIPv4=true'
-
-      if ! with_retry 3 apt-get update -y $AOPT; then
-        # backports 404 临时注释再试
-        sed -i 's#^\([[:space:]]*deb .* bullseye-backports.*\)#\# \1#' /etc/apt/sources.list 2>/dev/null || true
-        with_retry 2 apt-get update -y $AOPT -o Acquire::Check-Valid-Until=false || [ "$SBP_SOFT" = 1 ]
-      fi
-      ;;
-    dnf)
-      dnf clean metadata || true
-      with_retry 3 dnf makecache || [ "$SBP_SOFT" = 1 ]
-      ;;
-    yum)
-      yum clean all || true
-      with_retry 3 yum makecache fast || true
-      yum install -y epel-release || true   # EL7/老环境便于装 jq 等
-      ;;
-    pacman)
-      pacman-key --init >/dev/null 2>&1 || true
-      pacman-key --populate archlinux >/dev/null 2>&1 || true
-      with_retry 3 pacman -Syy --noconfirm || [ "$SBP_SOFT" = 1 ]
-      ;;
-    zypper)
-      zypper -n ref || zypper -n ref --force || true
-      ;;
+    apt)    with_retry 3 apt-get -y update || true ;;
+    dnf)    with_retry 3 dnf -y --setopt=install_weak_deps=False makecache || true ;;
+    yum)    with_retry 3 yum -y makecache fast || true ;;
+    zypper) with_retry 3 zypper -n ref || true ;;
+    pacman) with_retry 3 pacman -Syy --noconfirm || true ;;
   esac
 }
 
-# 逐包安装（单个失败不拖累整体）
+
 sbp_pm_install() {
+  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && { echo "[INFO] 已跳过安装依赖（SBP_SKIP_DEPS=1）：$*"; return 0; }
+  pm_quiet
   case "$PM" in
-    apt)
-      local p; apt-get update -y >/dev/null 2>&1 || true
-      for p in "$@"; do apt-get install -y --no-install-recommends "$p" || true; done
-      ;;
-    dnf)
-      local p; for p in "$@"; do dnf install -y "$p" || true; done
-      ;;
-    yum)
-      yum install -y epel-release || true
-      local p; for p in "$@"; do yum install -y "$p" || true; done
-      ;;
-    pacman)
-      pacman -Sy --noconfirm || [ "$SBP_SOFT" = 1 ]
-      local p; for p in "$@"; do pacman -S --noconfirm --needed "$p" || true; done
-      ;;
-    zypper)
-      zypper -n ref || true
-      local p; for p in "$@"; do zypper --non-interactive install "$p" || true; done
-      ;;
+    apt) with_retry 3 apt-get -y install "$@" ;;
+    dnf) with_retry 3 dnf -y --setopt=install_weak_deps=False install "$@" ;;
+    yum) with_retry 3 yum -y install "$@" ;;
   esac
 }
+
+pm_quiet() {
+  # 如果本来就跳过依赖，直接返回
+  [ "${SBP_SKIP_DEPS:-1}" = "1" ] && return 0
+
+  # 只在 RHEL 家族上处理
+  if command -v rpm >/dev/null 2>&1; then
+    # 尝试停掉会抢锁的服务
+    for u in packagekit dnf-makecache.timer dnf-makecache.service ; do
+      systemctl stop "$u" >/dev/null 2>&1 || true
+      systemctl disable --now "$u" >/dev/null 2>&1 || true
+    done
+
+    # 等待最多 30 秒让它们退出
+    for _ in $(seq 1 30); do
+      pgrep -fa 'dnf|yum|packagekit' >/dev/null || break
+      sleep 1
+    done
+
+    # 还在就强杀 + 清锁文件（谨慎使用）
+    if pgrep -fa 'dnf|yum|packagekit' >/dev/null; then
+      echo "[WARN] dnf/yum 仍在占用锁，尝试强制结束..."
+      pkill -9 -f 'dnf|yum|packagekit' || true
+      rm -f /var/run/dnf.pid /var/run/yum.pid /var/cache/dnf/metadata_lock.pid 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+}
+
 
 # 用包管理器装一轮依赖
 sbp_install_prereqs_pm() {
@@ -174,40 +343,65 @@ sbp_install_prereqs_pm() {
   return 0
 }
 
-# —— 二进制模式：直接获取 sing-box 可执行文件 —— #
+# 把 GOARCH 映射为 Release 中的资产文件名
+pick_mirror_asset() {
+  case "$1" in
+    amd64)         echo "sing-box-amd64" ;;
+    arm64)         echo "sing-box-arm64" ;;
+    armv7)         echo "sing-box-armv7" ;;
+    386)           echo "sing-box-386" ;;
+    386-softfloat) echo "sing-box-386-softfloat" ;; # 老设备/软浮点时可用
+    *)             echo "" ;;
+  esac
+}
+
+# —— 二进制模式：优先镜像，失败再回退官方 —— #
 install_singbox_binary() {
-  local arch goarch pkg tmp json url fn
-  goarch="$(detect_goarch)"
+  local goa fn url tmp
+
+  goa="$(detect_goarch)" || { echo "[ERROR] 无法识别架构"; return 1; }
+  fn="$(map_singbox_asset "$goa")"  || { echo "[ERROR] 不支持架构: $goa"; return 1; }
+
   tmp="$(mktemp -d)" || return 1
 
-  ensure_jq_static || { echo "[ERROR] 无法获取 jq，二进制模式失败"; rm -rf "$tmp"; return 1; }
+  # 1) 先走镜像（不需要 jq / 包管理器）
+  url="$SBP_BIN_MIRROR/$SBP_BIN_VER/$fn"
+  if with_retry 2 dl "$url" "$tmp/sing-box"; then
+    :
+  else
+    echo "[WARN] 镜像获取失败，尝试官方 Release 直连（无需 jq）"
 
-  json="$(with_retry 3 curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || { rm -rf "$tmp"; return 1; }
-  url="$(printf '%s' "$json" | jq -r --arg a "$goarch" '
-    .assets[] | select(.name|test("linux-" + $a + "\\.(tar\\.(xz|gz)|zip)$")) | .browser_download_url
-  ' | head -n1)"
+    # 2) 官方回退：下载 tar.gz 解出可执行文件，同样不需要 jq
+    #    官方命名：sing-box-1.12.8-linux-amd64.tar.gz 等
+    local ver_nov="${SBP_BIN_VER#v}" osarch
+    case "$goa" in
+      amd64) osarch="linux-amd64" ;;
+      arm64) osarch="linux-arm64" ;;
+      armv7) osarch="linux-armv7" ;;
+      386)   osarch="linux-386"   ;;
+      *)     rm -rf "$tmp"; echo "[ERROR] 不支持架构: $goa"; return 1 ;;
+    esac
 
-  if [ -z "$url" ] || [ "$url" = "null" ]; then
-    echo "[ERROR] 未找到匹配架构($goarch)的 sing-box 资产"; rm -rf "$tmp"; return 1
+    local tgz="https://github.com/SagerNet/sing-box/releases/download/v${ver_nov}/sing-box-${ver_nov}-${osarch}.tar.gz"
+    if ! with_retry 2 dl "$tgz" "$tmp/sb.tgz"; then
+      rm -rf "$tmp"; echo "[ERROR] 无法下载 sing-box 二进制"; return 1
+    fi
+
+    # 解包（需要 tar；CentOS/Ubuntu/Arch 都有，极简系统再考虑 busybox）
+    mkdir -p "$tmp/unpack"
+    tar -xzf "$tmp/sb.tgz" -C "$tmp/unpack" || { rm -rf "$tmp"; echo "[ERROR] 解包失败"; return 1; }
+
+    local bin
+    bin="$(find "$tmp/unpack" -type f -name 'sing-box' | head -n1)"
+    [ -n "$bin" ] || { rm -rf "$tmp"; echo "[ERROR] 包内未找到 sing-box"; return 1; }
+    cp -f "$bin" "$tmp/sing-box"
   fi
 
-  pkg="$tmp/pkg"
-  with_retry 3 dl "$url" "$pkg" || { rm -rf "$tmp"; return 1; }
-
-  case "$url" in
-    *.tar.xz)  if command -v xz >/dev/null 2>&1; then tar -xJf "$pkg" -C "$tmp"; else echo "[ERROR] 缺少 xz；请安装 xz/xz-utils 或换 .tar.gz/.zip"; rm -rf "$tmp"; return 1; fi ;;
-    *.tar.gz)  tar -xzf "$pkg" -C "$tmp" ;;
-    *.zip)     unzip -q "$pkg" -d "$tmp" || { echo "[ERROR] 缺少 unzip"; rm -rf "$tmp"; return 1; } ;;
-    *)         echo "[ERROR] 未知包格式：$url"; rm -rf "$tmp"; return 1 ;;
-  esac
-
-  fn="$(find "$tmp" -type f -name 'sing-box' | head -n1)"
-  [ -n "$fn" ] || { echo "[ERROR] 包内未找到 sing-box"; rm -rf "$tmp"; return 1; }
-
-  install -m 0755 "$fn" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
+  install -m0755 "$tmp/sing-box" "$SBP_BIN_DIR/sing-box" || { rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
   echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
+
 
 # 证书兜底（有 openssl 就生成；没有就先跳过，由业务决定是否强制）
 ensure_tls_cert() {
@@ -226,10 +420,17 @@ sbp_mark_deps_ok() {
   fi
 }
 
+
+
 # 入口：装依赖 / 二进制回退
 sbp_bootstrap() {
+ pm_quiet_init 
   [ "$EUID" -eq 0 ] || { echo "请以 root 运行（或 sudo）"; exit 1; }
 
+  # 【新增】3 秒快速探测 v6 → 统一应用到 curl/wget/apt/yum 等
+  net_pick_ip_mode
+  net_apply_ip_mode
+  
   if [ "$SBP_SKIP_DEPS" = 1 ]; then
     echo "[INFO] 已跳过启动时依赖检查（SBP_SKIP_DEPS=1）"
     return 0
@@ -260,7 +461,7 @@ sbp_bootstrap() {
   install_singbox_binary || { echo "[ERROR] 二进制模式安装 sing-box 失败"; exit 1; }
   ensure_tls_cert
 }
-# ===== [END] SBP 引导模块 v2.2.0+ =====
+# ===== [END] SBP 引导模块 v2.1.8+ =====
 
 
 # ===== 提前设默认，避免 set -u 早期引用未定义变量导致脚本直接退出 =====
@@ -268,6 +469,9 @@ SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
 BIN_PATH=${BIN_PATH:-/usr/local/bin/sing-box}
 SB_DIR=${SB_DIR:-/opt/sing-box}
 CONF_JSON=${CONF_JSON:-$SB_DIR/config.json}
+# —— mirror 配置（自己的 Release）——
+: "${SBP_BIN_MIRROR:=https://github.com/Alvin9999/singbox-bins/releases/download}"
+: "${SBP_BIN_TAG:=v1.12.8}"     # 当前发布的 tag；后续更换版本只改这里即可
 DATA_DIR=${DATA_DIR:-$SB_DIR/data}
 CERT_DIR=${CERT_DIR:-$SB_DIR/cert}
 WGCF_DIR=${WGCF_DIR:-$SB_DIR/wgcf}
@@ -286,7 +490,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v2.2.0"
+SCRIPT_VERSION="v2.3.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -365,11 +569,11 @@ safe_source_env(){ # 安全 source，忽略不存在文件
   set -u
 }
 
-get_ip(){ # 多源获取公网IP
+get_ip(){  # 多源获取公网IP
   local ip
-  ip=$(curl -fsSL ipv4.icanhazip.com || true)
-  [[ -z "$ip" ]] && ip=$(curl -fsSL ifconfig.me || true)
-  [[ -z "$ip" ]] && ip=$(curl -fsSL ip.sb || true)
+  ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ipv4.icanhazip.com || true)
+  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ifconfig.me || true)
+  [[ -z "$ip" ]] && ip=$(curl "${CURLX[@]}" -fsSL --connect-timeout 3 --max-time 5 https://ip.sb || true)
   echo "${ip:-127.0.0.1}"
 }
 
@@ -543,20 +747,51 @@ ensure_creds(){
 
 # ===== WARP（wgcf） =====
 WGCF_BIN=/usr/local/bin/wgcf
-install_wgcf(){
+install_wgcf() {
+  # 已有可执行就跳过
   [[ -x "$WGCF_BIN" ]] && return 0
-  local GOA url tmp
+
+  # 架构映射
+  local GOA url tmp json
   case "$(arch_map)" in
-    amd64) GOA=amd64;; arm64) GOA=arm64;; armv7) GOA=armv7;; 386) GOA=386;; *) GOA=amd64;;
+    amd64) GOA=amd64 ;;
+    arm64) GOA=arm64 ;;
+    armv7) GOA=armv7 ;;
+    386)   GOA=386   ;;
+    *)     GOA=amd64 ;;
   esac
-  url=$(curl -fsSL https://api.github.com/repos/ViRb3/wgcf/releases/latest \
-        | jq -r ".assets[] | select(.name|test(\"linux_${GOA}$\")) | .browser_download_url" | head -n1)
-  [[ -n "$url" ]] || { warn "获取 wgcf 下载地址失败"; return 1; }
-  tmp=$(mktemp -d)
-  curl -fsSL "$url" -o "$tmp/wgcf"
-  install -m0755 "$tmp/wgcf" "$WGCF_BIN"
+
+  # 确保有 jq（引导模块里一般有 ensure_jq_static；没有就略过这步）
+  if ! command -v jq >/dev/null 2>&1; then
+    type ensure_jq_static >/dev/null 2>&1 && ensure_jq_static || {
+      echo "[WARN] 缺少 jq，无法解析 GitHub API"; return 1;
+    }
+  fi
+
+  # 取最新发布信息（跟随 IPv4/IPv6 策略，短超时 + 重试）
+  json="$(with_retry 3 curl "${CURLX[@]}" -fsSL --connect-timeout 4 --max-time 15 \
+          https://api.github.com/repos/ViRb3/wgcf/releases/latest)" || true
+
+  # 从 assets 中挑出 linux_${GOA} 结尾的下载地址
+  if [[ -n "$json" ]]; then
+    url="$(printf '%s' "$json" \
+          | jq -r --arg GOA "linux_${GOA}" '.assets[] | select(.name|test($GOA + "$")) | .browser_download_url' \
+          | head -n1)"
+  fi
+
+  [[ -n "$url" ]] || { echo "[WARN] 获取 wgcf 下载地址失败"; return 1; }
+
+  # 下载并安装（用 dl() 带短超时/IPv4 选择）
+  tmp="$(mktemp -d)" || { echo "[WARN] mktemp 失败"; return 1; }
+  if ! dl "$url" "$tmp/wgcf"; then
+    echo "[WARN] 下载 wgcf 失败：$url"; rm -rf "$tmp"; return 1
+  fi
+
+  install -m0755 "$tmp/wgcf" "$WGCF_BIN" || { echo "[WARN] 安装 wgcf 失败"; rm -rf "$tmp"; return 1; }
   rm -rf "$tmp"
+  return 0
 }
+
 
 # —— Base64 清理 + 补齐：去掉引号/空白，长度 %4==2 补“==”，%4==3 补“=” ——
 pad_b64(){
@@ -721,7 +956,7 @@ systemctl daemon-reload
 systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 }
 
-# ===== 写 config.json（使用你提供的稳定配置逻辑） =====
+# ===== 写 config.json（使用提供的稳定配置逻辑） =====
 write_config(){
   ensure_dirs; load_env || true; load_creds || true; load_ports || true
   ensure_creds; save_all_ports; mk_cert
@@ -817,27 +1052,74 @@ write_config(){
 
 # ===== 防火墙 =====
 open_firewall(){
-  local rules=()
-  rules+=("${PORT_VLESSR}/tcp" "${PORT_VLESS_GRPCR}/tcp" "${PORT_TROJANR}/tcp" "${PORT_VMESS_WS}/tcp")
-  rules+=("${PORT_HY2}/udp" "${PORT_HY2_OBFS}/udp" "${PORT_TUIC}/udp")
-  rules+=("${PORT_SS2022}/tcp" "${PORT_SS2022}/udp" "${PORT_SS}/tcp" "${PORT_SS}/udp")
-  rules+=("${PORT_VLESSR_W}/tcp" "${PORT_VLESS_GRPCR_W}/tcp" "${PORT_TROJANR_W}/tcp" "${PORT_VMESS_WS_W}/tcp")
-  rules+=("${PORT_HY2_W}/udp" "${PORT_HY2_OBFS_W}/udp" "${PORT_TUIC_W}/udp")
-  rules+=("${PORT_SS2022_W}/tcp" "${PORT_SS2022_W}/udp" "${PORT_SS_W}/tcp" "${PORT_SS_W}/udp")
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q -E "active|活跃"; then
-    for r in "${rules[@]}"; do ufw allow "$r" >/dev/null 2>&1 || true; done; ufw reload >/dev/null 2>&1 || true
+  # 动态收集需要放行的端口（端口变量为空则自动忽略）
+  local -a rules=()
+  local p proto r v
+
+  _add() { v="${!1}"; proto="$2"; [[ -n "$v" ]] && rules+=("$v/$proto"); }
+
+  # ==== 常规端口 ====
+  _add PORT_VLESSR        tcp
+  _add PORT_VLESS_GRPCR   tcp
+  _add PORT_TROJANR       tcp
+  _add PORT_VMESS_WS      tcp
+  _add PORT_HY2           udp
+  _add PORT_HY2_OBFS      udp
+  _add PORT_TUIC          udp
+  _add PORT_SS            tcp
+  _add PORT_SS            udp
+  _add PORT_SS2022        tcp
+
+  # ==== WARP 端口（如果定义了 *_W 变量会自动加入）====
+  _add PORT_VLESSR_W      tcp
+  _add PORT_TROJANR_W     tcp
+  _add PORT_VMESS_WS_W    tcp
+  _add PORT_HY2_W         udp
+  _add PORT_TUIC_W        udp
+  _add PORT_SS_W          tcp
+  _add PORT_SS_W          udp
+  _add PORT_SS2022_W      tcp
+
+  # 尝试使用 ufw
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qE 'active|活跃'; then
+    for r in "${rules[@]}"; do
+      p="${r%/*}"; proto="${r#*/}"
+      ufw allow "$p/$proto" >/dev/null 2>&1 || true
+    done
+    ufw reload >/dev/null 2>&1 || true
+    return 0
+
+  # 尝试使用 firewalld
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     systemctl enable --now firewalld >/dev/null 2>&1 || true
-    for r in "${rules[@]}"; do firewall-cmd --permanent --add-port="$r" >/dev/null 2>&1 || true; done; firewall-cmd --reload >/dev/null 2>&1 || true
-  else
-    local p proto
-    for r in "${rules[@]}"; do p="${r%/*}"; proto="${r#*/}";
-      if [[ "$proto" == tcp ]]; then iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$p" -j ACCEPT; fi
-      if [[ "$proto" == udp ]]; then iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport "$p" -j ACCEPT; fi
+    for r in "${rules[@]}"; do
+      p="${r%/*}"; proto="${r#*/}"
+      firewall-cmd --permanent --add-port="${p}/${proto}" >/dev/null 2>&1 || true
     done
-    command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    return 0
+
+  # 方案 A：仅当系统有 iptables 时才落到这里
+  else
+    if command -v iptables >/dev/null 2>&1; then
+      for r in "${rules[@]}"; do
+        p="${r%/*}"; proto="${r#*/}"
+        if [[ "$proto" == tcp ]]; then
+          iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || \
+          iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null
+        else
+          iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null || \
+          iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null
+        fi
+      done
+      command -v netfilter-persistent >/dev/null 2>&1 && \
+        netfilter-persistent save >/dev/null 2>&1 || true
+    else
+      echo "[WARN] 未检测到 ufw/firewalld/iptables，已跳过防火墙放行；如被防火墙拦截请手动开放端口。"
+    fi
   fi
 }
+
 
 # ===== 分享链接（分组输出 + 提示） =====
 print_links_grouped(){
