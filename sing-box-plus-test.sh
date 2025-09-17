@@ -904,18 +904,23 @@ install_singbox() {
   re="^sing-box-.*-linux-${arch}\\.(tar\\.(gz|xz)|zip)$"
 
   # 先在目标 release 里找；找不到再从所有 releases 里兜底
-  url="$(curl -fsSL "$rel_url" | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' | head -n1)"
-  if [[ -z "$url" ]]; then
-    url="$(curl -fsSL "https://api.github.com/repos/${repo}/releases" \
-           | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
-  fi
-  [[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
+url="$("${CURLX[@]}" "$rel_url" \
+      | jq -r --arg re "$re" '.assets[] | select(.name | test($re)) | .browser_download_url' \
+      | head -n1)"
+if [[ -z "$url" ]]; then
+  url="$("${CURLX[@]}" "https://api.github.com/repos/${repo}/releases" \
+         | jq -r --arg re "$re" '[ .[] | .assets[] | select(.name | test($re)) | .browser_download_url ][0]')"
+fi
+[[ -n "$url" ]] || { err "下载 sing-box 失败：未匹配到发行包（arch=${arch} tag=${tag})"; return 1; }
 
+tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
 
-  tmp="$(mktemp -d)"; pkg="${tmp}/pkg"
-  if ! curl -fL "$url" -o "$pkg"; then
-    rm -rf "$tmp"; err "下载 sing-box 失败"; return 1
-  fi
+# 下载包（先试 CURLX，失败回退 WGETX）
+if ! with_retry 3 "${CURLX[@]}" -o "$pkg" "$url"; then
+  with_retry 3 "${WGETX[@]}" -O "$pkg" "$url" \
+    || { rm -rf "$tmp"; err "下载 sing-box 失败"; return 1; }
+fi
+
 
   # 解压
   if echo "$url" | grep -qE '\.tar\.gz$|\.tgz$'; then
