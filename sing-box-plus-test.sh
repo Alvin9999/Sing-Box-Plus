@@ -738,7 +738,7 @@ update_argo_host_and_links() {
   fi
   [ -n "$host" ] || { echo "[WARN] 未获取到 ARGO(${tag}) 域名"; return 0; }
   mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
-  if [ "$tag" = "A" ] then
+  if [ "$tag" = "A" ]; then
     echo "$host" > "$SBP_ARGO_HOST_FILE"
   else
     echo "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
