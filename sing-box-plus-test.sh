@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
+#  Sing-Box-Plus 管理脚本（20 节点：直连 9 + WARP 9 + ARGO 2）
 #  Version: v3.0.1
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
