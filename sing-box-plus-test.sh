@@ -775,17 +775,21 @@ printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&s
   echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
 }
 
-start_cloudflared_argo() {
-  [ "${SBP_ARGO}" = "1" ] || return 0
-  install_cloudflared || return 0
-  mkdir -p /opt/sing-box
+  # 选一个没有被占用的随机端口（28000-40000）
+  pick_free_port() {
+    local p
+    for p in $(shuf -i 28000-40000 -n 200); do
+      ss -lnt "( sport = :$p )" 2>/dev/null | grep -q LISTEN || { echo "$p"; return 0; }
+    done
+    echo 38888
+  }
 
   local ws_a ws_b path_a path_b
-  ws_a="$(grep -E '^VLESS_WS_PORT=' /opt/sing-box/ports.env 2>/dev/null | cut -d= -f2)"
-  [ -n "$ws_a" ] || ws_a=$(( (RANDOM%20000) + 30000 ))
-  ws_b=$(( (RANDOM%20000) + 30000 ))
+  ws_a="$(pick_free_port)"
+  ws_b="$(pick_free_port)"
   path_a="/argo-$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)"
   path_b="/argo-$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)"
+
 
   cat >/opt/sing-box/argo.env <<EOF
 ARGO_WS_PORT=$ws_a
