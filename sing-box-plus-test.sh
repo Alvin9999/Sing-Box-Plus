@@ -809,6 +809,47 @@ rebuild_argo_links() {
   echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
 }
 
+augment_config_with_argo() {
+  [ -f /opt/sing-box/argo.env ] || return 0
+  . /opt/sing-box/argo.env
+  [ -n "$ARGO_WS_PORT" ] && [ -n "$ARGO_WS_PATH" ] || return 0
+
+  # 配置里是否有 warp 出站
+  local has_warp=0
+  if jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
+    has_warp=1
+  fi
+
+  # 追加 ARGO A/B 本地入站
+  local tmpcfg
+  tmpcfg="$(mktemp)"
+  jq --arg UID "$UUID" \
+     --argjson PA "${ARGO_WS_PORT}" \
+     --arg APath "${ARGO_WS_PATH}" \
+     --argjson PB "${ARGO_WS_PORT_WARP:-0}" \
+     --arg BPath "${ARGO_WS_PATH_WARP:-}" \
+     '
+     .inbounds += [
+       {type:"vless", tag:"vless-ws-argo", listen:"127.0.0.1", listen_port:$PA,
+        users:[{uuid:$UID}], transport:{type:"ws", path:$APath}, tls:{enabled:false}}
+     ] +
+     ( if $PB>0 and ($BPath|length)>0 then
+         [ {type:"vless", tag:"vless-ws-argo-warp", listen:"127.0.0.1", listen_port:$PB,
+             users:[{uuid:$UID}], transport:{type:"ws", path:$BPath}, tls:{enabled:false}} ]
+       else [] end )
+     ' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
+
+  # 给 warp 入站加路由（如果存在 warp 出站）
+  if [ "$has_warp" = "1" ]; then
+    tmpcfg="$(mktemp)"
+    jq '
+      .route = (.route // {}) |
+      .route.rules = (.route.rules // []) |
+      .route.rules += [ { inbound: ["vless-ws-argo-warp"], outbound:"warp" } ]
+    ' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
+  fi
+}
+
 
 start_cloudflared_argo() {
   [ "${SBP_ARGO}" = "1" ] || return 0
