@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9 + ARGO 2）
-#  Version: v3.0.0
+#  Sing-Box-Plus 管理脚本（20 节点：直连 9 + WARP 9 + ARGO 2）
+#  Version: v3.0.2
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -381,7 +381,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v3.0.0"
+SCRIPT_VERSION="v3.0.2"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -721,7 +721,10 @@ ensure_warp_profile(){
 
 # ===== ARGO / Quick Tunnel 支持 =====
 is_warp_ready() {
-  ip link show wgcf 2>/dev/null 1>&2 || ip link show warp 2>/dev/null 1>&2 || return 1
+  [ -s /opt/sing-box/wgcf/wgcf-profile.conf ] && return 0
+  [ -f /opt/sing-box/config.json ] && \
+    jq -e '.outbounds[]? | select(.tag=="warp")' /opt/sing-box/config.json >/dev/null 2>&1 && return 0
+  return 1
 }
 
 update_argo_host_and_links() {
@@ -760,14 +763,14 @@ rebuild_argo_links() {
   touch "$SBP_LINKS_FILE"
 
   if [ -n "$HOST_A" ]; then
-    # 直连 A
+# A: 直连
 printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo\n' \
-  "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A"
+  "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A" >> "$SBP_LINKS_FILE"
   fi
   if [ -n "$HOST_B" ] && is_warp_ready; then
-    # WARP B（如启用）
+# B: WARP（存在时）
 printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo-warp\n' \
-  "$UUID" "$HOST_B" "$HOST_B" "$ARGO_WS_PATH_WARP" "$HOST_B"
+  "$UUID" "$HOST_B" "$HOST_B" "$ARGO_WS_PATH_WARP" "$HOST_B" >> "$SBP_LINKS_FILE"
   fi
   echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
 }
@@ -1087,7 +1090,17 @@ open_firewall(){
 print_links_grouped(){
   load_env; load_creds; load_ports
   local ip; ip=$(get_ip)
+
+  # 读取（可能存在的）ARGO 链接：A -> 直连组，B -> WARP 组
+  local _ARGO_A="" _ARGO_B=""
+  [ -s "$SBP_LINKS_FILE" ] && _ARGO_A="$(grep -F '#vless-ws-argo'       "$SBP_LINKS_FILE" | head -n1 || true)"
+  [ -s "$SBP_LINKS_FILE" ] && _ARGO_B="$(grep -F '#vless-ws-argo-warp' "$SBP_LINKS_FILE" | head -n1 || true)"
+  local _ARGO_A_N=0 _ARGO_B_N=0
+  [ -n "$_ARGO_A" ] && _ARGO_A_N=1
+  [ -n "$_ARGO_B" ] && _ARGO_B_N=1
+
   local links_direct=() links_warp=()
+
   # 直连9
   links_direct+=("vless://${UUID}@${ip}:${PORT_VLESSR}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=tcp#vless-reality")
   links_direct+=("vless://${UUID}@${ip}:${PORT_VLESS_GRPCR}?encryption=none&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}&type=grpc&serviceName=${GRPC_SERVICE}#vless-grpc-reality")
@@ -1118,25 +1131,27 @@ JSON
   links_warp+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${ip}:${PORT_SS_W}#ss-warp")
   links_warp+=("tuic://${UUID}:$(urlenc "${UUID}")@${ip}:${PORT_TUIC_W}?congestion_control=bbr&alpn=h3&insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5-warp")
 
-  echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"
+  # 动态数量 = 18 + (ARGO A 存在?1:0) + (ARGO B 存在?1:0)
+  local total=$((18 + _ARGO_A_N + _ARGO_B_N))
+  local cnt_direct=$((9 + _ARGO_A_N))
+  local cnt_warp=$((9 + _ARGO_B_N))
+
+  echo -e "${C_BLUE}${C_BOLD}分享链接（${total} 个）${C_RESET}"
   hr
-  echo -e "${C_CYAN}${C_BOLD}【直连节点（9）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
+  echo -e "${C_CYAN}${C_BOLD}【直连节点（${cnt_direct}）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
   for l in "${links_direct[@]}"; do echo "  $l"; done
+  # 把 ARGO(A) 混排到直连组尾部
+  [ -n "$_ARGO_A" ] && echo "  $_ARGO_A"
   hr
-  echo -e "${C_CYAN}${C_BOLD}【WARP 节点（9）】${C_RESET}（同上 9 种，带 -warp）"
+  echo -e "${C_CYAN}${C_BOLD}【WARP 节点（${cnt_warp}）】${C_RESET}（同上 9 种，带 -warp）"
   echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
   echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
   for l in "${links_warp[@]}"; do echo "  $l"; done
+  # 把 ARGO(B) 混排到 WARP 组尾部
+  [ -n "$_ARGO_B" ] && echo "  $_ARGO_B"
   hr
-
-
-# —— ARGO 节点（如启用） ——
-if [ -s "$SBP_LINKS_FILE" ]; then
-  echo -e "${C_CYAN}${C_BOLD}【ARGO 节点】${C_RESET}（Quick 免登录，cloudflared 重启域名会更新）"
-  cat "$SBP_LINKS_FILE"
-  hr
-fi
 }
+
 
 # ===== BBR =====
 enable_bbr(){
