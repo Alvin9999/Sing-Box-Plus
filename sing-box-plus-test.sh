@@ -736,14 +736,14 @@ update_argo_host_and_links() {
     local unit="cloudflared-argo"; [ "$tag" = "B" ] && unit="cloudflared-argo-warp"
     host="$(journalctl -u "$unit" -n 200 --no-pager 2>/dev/null | grep -Eo 'https://[^ ]+trycloudflare\.com' | sed 's#https://##' | tail -n1)"
   fi
-  [ -n "$host" ] || { echo "[WARN] 未获取到 ARGO(${tag}) 域名"; return 0; }
-  mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
-  if [ "$tag" = "A" ]; then
-    echo "$host" > "$SBP_ARGO_HOST_FILE"
-  else
-    echo "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
-  fi
-  rebuild_argo_links
+[ -n "$host" ] || { echo "[WARN] 未获取到 ARGO(${tag}) 域名"; return 0; }
+mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
+if [ "$tag" = "A" ]; then
+  echo "$host" > "$SBP_ARGO_HOST_FILE"
+else
+  echo "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
+fi
+rebuild_argo_links
 }
 
 rebuild_argo_links() {
