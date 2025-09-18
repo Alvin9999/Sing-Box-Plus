@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Sing-Box-Plus 管理脚本（20 节点：直连 9 + WARP 9 + ARGO 2）
-#  Version: v3.0.3
+#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
+#  Version: v3.0.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -24,15 +24,7 @@ stty erase ^H # 让退格键在终端里正常工作
 : "${SBP_BIN_VERSION:=}"           # 例如 v1.12.8；留空=latest
 : "${SBP_BIN_URL:=}"               # 当 channel=custom 时使用的直链
 : "${SBP_LITE:=0}"                 # 1=轻量模式（少依赖，优先单文件）
-: "${SBP_386_SOFT:=0}"
-
-# —— ARGO / Cloudflared（Quick 免登录）—— #
-: "${SBP_ARGO:=1}"                           # 1=启用 ARGO；失败会优雅跳过
-: "${SBP_ARGO_MODE:=quick}"                  # 目前只实现 quick；保留扩展 token
-: "${SBP_ARGO_BIN_DIR:=${SBP_BIN_DIR}}"      # 复用 /var/lib/sing-box-plus/bin
-: "${SBP_ARGO_HOST_FILE:=/opt/sing-box/argo_host.txt}"    # 保存 trycloudflare 域名
-: "${SBP_LINKS_FILE:=/opt/sing-box/links.txt}"            # 分享链接总文件
-             # 1=强制使用 386-softfloat 资产
+: "${SBP_386_SOFT:=0}"             # 1=强制使用 386-softfloat 资产
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -223,25 +215,6 @@ install_singbox_binary() {
   rm -rf "$tmp"
   echo "[OK] 已安装 sing-box 到 $SBP_BIN_DIR/sing-box"
 }
-
-# ===== cloudflared 安装（单文件） =====
-install_cloudflared() {
-  [ "${SBP_ARGO}" = "1" ] || return 0
-  command -v "${SBP_ARGO_BIN_DIR}/cloudflared" >/dev/null 2>&1 && return 0
-  mkdir -p "$SBP_ARGO_BIN_DIR"
-  local arch
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) arch=amd64 ;;
-  esac
-  local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
-  with_retry 3 dl "$url" "${SBP_ARGO_BIN_DIR}/cloudflared" || {
-    echo "[WARN] cloudflared 下载失败，跳过 ARGO"; return 1; }
-  chmod +x "${SBP_ARGO_BIN_DIR}/cloudflared"
-  return 0
-}
-
 
 
 # —— 从 Alvin9999/singbox-bins 获取「单文件」二进制 —— #
@@ -719,222 +692,6 @@ ensure_warp_profile(){
   save_warp
 }
 
-# ===== ARGO / Quick Tunnel 支持 =====
-is_warp_ready() {
-  # 先看当前配置是否已存在 warp 出口（sing-box 内置 WireGuard）
-  if [ -f "${CONF_JSON:-/opt/sing-box/config.json}" ] \
-     && jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
-    return 0
-  fi
-  # 其次看凭据里是否已经拿到 WARP 关键字段
-  if [ -f /opt/sing-box/creds.env ]; then
-    . /opt/sing-box/creds.env
-    if [ -n "${WARP_PRIVATE_KEY:-}" ] && [ -n "${WARP_PEER_PUBLIC_KEY:-}" ] \
-       && [ -n "${WARP_ENDPOINT_HOST:-}" ] && [ -n "${WARP_ENDPOINT_PORT:-}" ]; then
-      return 0
-    fi
-  fi
-  return 1
-}
-
-
-update_argo_host_and_links() {
-  # tag: A=直连，B=WARP
-  # log: 对应 cloudflared 的日志文件路径
-  local tag="$1" log="$2" host=""
-
-  # 1) 先从日志文件抓（最多等 30 秒，常见场景 cloudflared 启动后会稍等才打印域名）
-  if [ -n "$log" ]; then
-    for _ in $(seq 1 30); do
-      if [ -s "$log" ]; then
-        host="$(sed -n 's#.*https://\([^/ ]*trycloudflare\.com\).*#\1#p' "$log" | tail -1)"
-        [ -n "$host" ] && break
-      fi
-      sleep 1
-    done
-  fi
-
-  # 2) 兜底：从 journald 抓（某些环境没有把输出重定向到文件）
-  if [ -z "$host" ]; then
-    local unit="cloudflared-argo"; [ "$tag" = "B" ] && unit="cloudflared-argo-warp"
-    host="$(journalctl -u "$unit" -n 400 --no-pager 2>/dev/null \
-            | sed -n 's#.*https://\([^/ ]*trycloudflare\.com\).*#\1#p' | tail -1)"
-  fi
-
-  # 3) 没抓到就提示，避免中断主流程
-  if [ -z "$host" ]; then
-    echo "[WARN] 未获取到 ARGO(${tag}) 域名；稍后可重试或重启 cloudflared-argo${tag=B?'-warp':''}。"
-    return 0
-  fi
-
-  # 4) 写入 host 文件并重建链接
-  mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
-  if [ "$tag" = "A" ]; then
-    printf '%s\n' "$host" > "$SBP_ARGO_HOST_FILE"
-  else
-    printf '%s\n' "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
-  fi
-  echo "[OK] 捕获 ARGO(${tag}) 域名：$host"
-
-  rebuild_argo_links
-}
-
-rebuild_argo_links() {
-  [ -f /opt/sing-box/argo.env ] || return 0
-  . /opt/sing-box/argo.env
-  . /opt/sing-box/creds.env 2>/dev/null || true
-  UUID="${UUID:-$(cat /proc/sys/kernel/random/uuid)}"
-
-  local HOST_A="" HOST_B=""
-  [ -s "$SBP_ARGO_HOST_FILE" ] && HOST_A="$(cat "$SBP_ARGO_HOST_FILE")"
-  [ -s "${SBP_ARGO_HOST_FILE%.txt}-warp.txt" ] && HOST_B="$(cat "${SBP_ARGO_HOST_FILE%.txt}-warp.txt")"
-
-  mkdir -p "$(dirname "$SBP_LINKS_FILE")"
-  local tmp="$(mktemp)"
-
-  # A：直连 ARGO（cloudflared A）
-  if [ -n "$HOST_A" ]; then
-    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo\n' \
-      "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A" >>"$tmp"
-  fi
-
-  # B：WARP ARGO（cloudflared B，前提是 WARP 可用）
-  if [ -n "$HOST_B" ] && is_warp_ready; then
-    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo-warp\n' \
-      "$UUID" "$HOST_B" "$HOST_B" "${ARGO_WS_PATH_WARP:-$ARGO_WS_PATH}" "$HOST_B" >>"$tmp"
-  fi
-
-  # 用临时文件原子更新
-  mv -f "$tmp" "$SBP_LINKS_FILE"
-  echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
-}
-
-augment_config_with_argo() {
-  [ -f /opt/sing-box/argo.env ] || return 0
-  . /opt/sing-box/argo.env
-  [ -n "$ARGO_WS_PORT" ] && [ -n "$ARGO_WS_PATH" ] || return 0
-
-  # 配置里是否有 warp 出站
-  local has_warp=0
-  if jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
-    has_warp=1
-  fi
-
-  # 追加 ARGO A/B 本地入站
-  local tmpcfg
-  tmpcfg="$(mktemp)"
-  jq --arg UID "$UUID" \
-     --argjson PA "${ARGO_WS_PORT}" \
-     --arg APath "${ARGO_WS_PATH}" \
-     --argjson PB "${ARGO_WS_PORT_WARP:-0}" \
-     --arg BPath "${ARGO_WS_PATH_WARP:-}" \
-     '
-     .inbounds += [
-       {type:"vless", tag:"vless-ws-argo", listen:"127.0.0.1", listen_port:$PA,
-        users:[{uuid:$UID}], transport:{type:"ws", path:$APath}, tls:{enabled:false}}
-     ] +
-     ( if $PB>0 and ($BPath|length)>0 then
-         [ {type:"vless", tag:"vless-ws-argo-warp", listen:"127.0.0.1", listen_port:$PB,
-             users:[{uuid:$UID}], transport:{type:"ws", path:$BPath}, tls:{enabled:false}} ]
-       else [] end )
-     ' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
-
-  # 给 warp 入站加路由（如果存在 warp 出站）
-  if [ "$has_warp" = "1" ]; then
-    tmpcfg="$(mktemp)"
-    jq '
-      .route = (.route // {}) |
-      .route.rules = (.route.rules // []) |
-      .route.rules += [ { inbound: ["vless-ws-argo-warp"], outbound:"warp" } ]
-    ' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
-  fi
-}
-
-
-start_cloudflared_argo() {
-  [ "${SBP_ARGO}" = "1" ] || return 0
-  install_cloudflared || return 0
-  SBP_ARGO_BIN_DIR="${SBP_ARGO_BIN_DIR:-/usr/local/bin}"   # ← 兜底
-  mkdir -p /opt/sing-box
-
-  # 选一个未被占用的随机端口（28000-40000）
-  pick_free_port() {
-    local p
-    for p in $(shuf -i 28000-40000 -n 200); do
-      ss -lnt "( sport = :$p )" 2>/dev/null | grep -q LISTEN || { echo "$p"; return 0; }
-    done
-    echo 38888
-  }
-
-  # 本次 ARGO 使用的本地端口与路径（避免与原18个入站冲突）
-  local ws_a ws_b path_a path_b
-  ws_a="$(pick_free_port)"
-  ws_b="$(pick_free_port)"
-  path_a="/argo-$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)"
-  path_b="/argo-$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)"
-
-  cat >/opt/sing-box/argo.env <<EOF
-ARGO_WS_PORT=$ws_a
-ARGO_WS_PATH=$path_a
-ARGO_WS_PORT_WARP=$ws_b
-ARGO_WS_PATH_WARP=$path_b
-EOF
-
-  # 先把 ARGO 入站写进配置并让 sing-box 监听起来（关键增强点）
-  augment_config_with_argo
-  systemctl restart sing-box 2>/dev/null || true
-  sleep 1
-
-  # systemd A（直连）
-  cat >/etc/systemd/system/cloudflared-argo.service <<EOF
-[Unit]
-Description=Cloudflare Argo Tunnel (A: direct)
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --edge-ip-version auto --protocol http2 --url http://127.0.0.1:${ws_a}
-Restart=always
-RestartSec=3
-StandardOutput=append:/var/log/cloudflared-argo.log
-StandardError=append:/var/log/cloudflared-argo.log
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # systemd B（WARP 可用时）
-  if is_warp_ready; then
-    cat >/etc/systemd/system/cloudflared-argo-warp.service <<EOF
-[Unit]
-Description=Cloudflare Argo Tunnel (B: warp)
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --edge-ip-version auto --protocol http2 --url http://127.0.0.1:${ws_b}
-Restart=always
-RestartSec=3
-StandardOutput=append:/var/log/cloudflared-argo-warp.log
-StandardError=append:/var/log/cloudflared-argo-warp.log
-[Install]
-WantedBy=multi-user.target
-EOF
-  fi
-
-  systemctl daemon-reload
-  systemctl enable --now cloudflared-argo >/dev/null 2>&1 || true
-  if systemctl list-unit-files | grep -q '^cloudflared-argo-warp\.service'; then
-    systemctl enable --now cloudflared-argo-warp >/dev/null 2>&1 || true
-  fi
-
-  # 抓取域名并重建分享链接（配合你刚换的新 update_argo_host_and_links）
-  update_argo_host_and_links "A" "/var/log/cloudflared-argo.log"
-  if systemctl is-enabled cloudflared-argo-warp >/dev/null 2>&1; then
-    update_argo_host_and_links "B" "/var/log/cloudflared-argo-warp.log"
-  fi
-}
-
-
 # ===== 依赖与安装 =====
 install_deps(){
   apt-get update -y >/dev/null 2>&1 || true
@@ -1195,14 +952,6 @@ JSON
   echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
   for l in "${links_warp[@]}"; do echo "  $l"; done
   hr
-
-
-# —— ARGO 节点（如启用） ——
-if [ -s "$SBP_LINKS_FILE" ]; then
-  echo -e "${C_CYAN}${C_BOLD}【ARGO 节点】${C_RESET}（Quick 免登录，cloudflared 重启域名会更新）"
-  cat "$SBP_LINKS_FILE"
-  hr
-fi
 }
 
 # ===== BBR =====
@@ -1317,8 +1066,7 @@ menu(){
   echo -e "${C_BLUE}[信息] 正在检查 sing-box 安装状态...${C_RESET}"
   install_singbox            || true
   ensure_warp_profile        || true
-  write_config  ; start_cloudflared_argo || true
-  augment_config_with_argo || true               || { echo "[ERR] 生成配置失败"; }
+  write_config               || { echo "[ERR] 生成配置失败"; }
   write_systemd              || true
   open_firewall              || true
   systemctl restart "${SYSTEMD_SERVICE}" || true
@@ -1336,25 +1084,6 @@ menu(){
     *) menu ;;
   esac
 }
-
-
-# ===== 非交互参数 =====
-case "${1:-}" in
-  --links)
-    if [ -s "$SBP_LINKS_FILE" ]; then
-      cat "$SBP_LINKS_FILE"
-    else
-      echo "还没有生成 ARGO 链接"
-    fi
-    exit 0 ;;
-  --refresh-argo)
-    systemctl restart cloudflared-argo 2>/dev/null || true
-    systemctl restart cloudflared-argo-warp 2>/dev/null || true
-    sleep 2
-    rebuild_argo_links
-    [ -s "$SBP_LINKS_FILE" ] && cat "$SBP_LINKS_FILE"
-    exit 0 ;;
-esac
 
 # ===== 入口 =====
 menu
