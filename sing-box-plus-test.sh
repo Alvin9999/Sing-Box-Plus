@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Sing-Box-Plus 管理脚本（20 节点：直连 9 + WARP 9 + ARGO 2）
-#  Version: v3.0.1
+#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
+#  Version: v3.0.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
@@ -24,7 +24,7 @@ stty erase ^H # 让退格键在终端里正常工作
 : "${SBP_BIN_VERSION:=}"           # 例如 v1.12.8；留空=latest
 : "${SBP_BIN_URL:=}"               # 当 channel=custom 时使用的直链
 : "${SBP_LITE:=0}"                 # 1=轻量模式（少依赖，优先单文件）
-: "${SBP_386_SOFT:=0}"             # 1=强制使用 386-softfloat 资产
+: "${SBP_386_SOFT:=0}"
 
 # —— ARGO / Cloudflared（Quick 免登录）—— #
 : "${SBP_ARGO:=1}"                           # 1=启用 ARGO；失败会优雅跳过
@@ -32,6 +32,7 @@ stty erase ^H # 让退格键在终端里正常工作
 : "${SBP_ARGO_BIN_DIR:=${SBP_BIN_DIR}}"      # 复用 /var/lib/sing-box-plus/bin
 : "${SBP_ARGO_HOST_FILE:=/opt/sing-box/argo_host.txt}"    # 保存 trycloudflare 域名
 : "${SBP_LINKS_FILE:=/opt/sing-box/links.txt}"            # 分享链接总文件
+             # 1=强制使用 386-softfloat 资产
 
 mkdir -p "$SBP_BIN_DIR" 2>/dev/null || true
 export PATH="$SBP_BIN_DIR:$PATH"
@@ -380,7 +381,7 @@ ENABLE_TUIC=${ENABLE_TUIC:-true}
 
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v3.0.1"
+SCRIPT_VERSION="v3.0.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -725,14 +726,19 @@ is_warp_ready() {
 
 update_argo_host_and_links() {
   local tag="$1" log="$2" host=
-  for i in $(seq 1 10); do
+  for i in $(seq 1 20); do
     host="$(grep -Eo 'https://[^ ]+trycloudflare\.com' "$log" 2>/dev/null | sed 's#https://##' | tail -n1)"
     [ -n "$host" ] && break
     sleep 1
   done
+  if [ -z "$host" ]; then
+    # Fallback: journald
+    local unit="cloudflared-argo"; [ "$tag" = "B" ] && unit="cloudflared-argo-warp"
+    host="$(journalctl -u "$unit" -n 200 --no-pager 2>/dev/null | grep -Eo 'https://[^ ]+trycloudflare\.com' | sed 's#https://##' | tail -n1)"
+  fi
   [ -n "$host" ] || { echo "[WARN] 未获取到 ARGO(${tag}) 域名"; return 0; }
   mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
-  if [ "$tag" = "A" ]; then
+  if [ "$tag" = "A" ] then
     echo "$host" > "$SBP_ARGO_HOST_FILE"
   else
     echo "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
@@ -789,7 +795,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate run --url http://127.0.0.1:${ws_a}
+ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:${ws_a}
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/cloudflared-argo.log
@@ -807,7 +813,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate run --url http://127.0.0.1:${ws_b}
+ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:${ws_b}
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/cloudflared-argo-warp.log
@@ -829,19 +835,16 @@ EOF
   fi
 }
 
-# 生成后增强配置：在 config.json 里追加 ARGO 入站与路由
 augment_config_with_argo() {
   [ -f /opt/sing-box/argo.env ] || return 0
   . /opt/sing-box/argo.env
   [ -n "$ARGO_WS_PORT" ] && [ -n "$ARGO_WS_PATH" ] || return 0
 
-  # 检查是否已有 warp 出站
   local has_warp=0
   if jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
     has_warp=1
   fi
 
-  # 追加 inbounds
   tmpcfg="$(mktemp)"
   jq --arg UID "$UUID"      --argjson PA "${ARGO_WS_PORT}"      --arg APath "${ARGO_WS_PATH}"      --argjson PB "${ARGO_WS_PORT_WARP:-0}"      --arg BPath "${ARGO_WS_PATH_WARP:-}"      ' .inbounds += [
          {type:"vless", tag:"vless-ws-argo", listen:"127.0.0.1", listen_port:$PA,
@@ -852,7 +855,6 @@ augment_config_with_argo() {
              users:[{uuid:$UID}], transport:{type:"ws", path:$BPath}, tls:{enabled:false}} ]
          else [] end )' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
 
-  # 追加路由规则（仅当存在 warp 出站）
   if [ "$has_warp" = "1" ]; then
     tmpcfg="$(mktemp)"
     jq ' .route = (.route // {}) |
