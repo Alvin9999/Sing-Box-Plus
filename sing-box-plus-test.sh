@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
+#  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9 + ARGO 2）
 #  Version: v3.0.0
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
@@ -760,10 +760,14 @@ rebuild_argo_links() {
   touch "$SBP_LINKS_FILE"
 
   if [ -n "$HOST_A" ]; then
-    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&path=%s&sni=%s#vless-ws-argo\n'       "$UUID" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A" >> "$SBP_LINKS_FILE"
+    # 直连 A
+printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo\n' \
+  "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A"
   fi
   if [ -n "$HOST_B" ] && is_warp_ready; then
-    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&path=%s&sni=%s#vless-ws-argo-warp\n'       "$UUID" "$HOST_B" "$ARGO_WS_PATH_WARP" "$HOST_B" >> "$SBP_LINKS_FILE"
+    # WARP B（如启用）
+printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo-warp\n' \
+  "$UUID" "$HOST_B" "$HOST_B" "$ARGO_WS_PATH_WARP" "$HOST_B"
   fi
   echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
 }
