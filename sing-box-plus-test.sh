@@ -721,8 +721,22 @@ ensure_warp_profile(){
 
 # ===== ARGO / Quick Tunnel 支持 =====
 is_warp_ready() {
-  ip link show wgcf 2>/dev/null 1>&2 || ip link show warp 2>/dev/null 1>&2 || return 1
+  # 先看当前配置是否已存在 warp 出口（sing-box 内置 WireGuard）
+  if [ -f "${CONF_JSON:-/opt/sing-box/config.json}" ] \
+     && jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
+    return 0
+  fi
+  # 其次看凭据里是否已经拿到 WARP 关键字段
+  if [ -f /opt/sing-box/creds.env ]; then
+    . /opt/sing-box/creds.env
+    if [ -n "${WARP_PRIVATE_KEY:-}" ] && [ -n "${WARP_PEER_PUBLIC_KEY:-}" ] \
+       && [ -n "${WARP_ENDPOINT_HOST:-}" ] && [ -n "${WARP_ENDPOINT_PORT:-}" ]; then
+      return 0
+    fi
+  fi
+  return 1
 }
+
 
 update_argo_host_and_links() {
   local tag="$1" log="$2" host=
@@ -756,21 +770,26 @@ rebuild_argo_links() {
   [ -s "$SBP_ARGO_HOST_FILE" ] && HOST_A="$(cat "$SBP_ARGO_HOST_FILE")"
   [ -s "${SBP_ARGO_HOST_FILE%.txt}-warp.txt" ] && HOST_B="$(cat "${SBP_ARGO_HOST_FILE%.txt}-warp.txt")"
 
-  sed -i '/#vless-ws-argo/d' "$SBP_LINKS_FILE" 2>/dev/null || true
-  touch "$SBP_LINKS_FILE"
+  mkdir -p "$(dirname "$SBP_LINKS_FILE")"
+  local tmp="$(mktemp)"
 
+  # A：直连 ARGO（cloudflared A）
   if [ -n "$HOST_A" ]; then
-    # 直连 A
-printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo\n' \
-  "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A"
+    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo\n' \
+      "$UUID" "$HOST_A" "$HOST_A" "$ARGO_WS_PATH" "$HOST_A" >>"$tmp"
   fi
+
+  # B：WARP ARGO（cloudflared B，前提是 WARP 可用）
   if [ -n "$HOST_B" ] && is_warp_ready; then
-    # WARP B（如启用）
-printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo-warp\n' \
-  "$UUID" "$HOST_B" "$HOST_B" "$ARGO_WS_PATH_WARP" "$HOST_B"
+    printf 'vless://%s@%s:443?encryption=none&security=tls&type=ws&host=%s&path=%s&sni=%s&alpn=http/1.1#vless-ws-argo-warp\n' \
+      "$UUID" "$HOST_B" "$HOST_B" "${ARGO_WS_PATH_WARP:-$ARGO_WS_PATH}" "$HOST_B" >>"$tmp"
   fi
+
+  # 用临时文件原子更新
+  mv -f "$tmp" "$SBP_LINKS_FILE"
   echo "[OK] 已更新 ARGO 分享链接 -> $SBP_LINKS_FILE"
 }
+
 
 start_cloudflared_argo() {
   [ "${SBP_ARGO}" = "1" ] || return 0
@@ -808,7 +827,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:${ws_a}
+ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --edge-ip-version auto --protocol http2 --url http://127.0.0.1:${ws_a}
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/cloudflared-argo.log
@@ -826,7 +845,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:${ws_b}
+ExecStart=${SBP_ARGO_BIN_DIR}/cloudflared tunnel --no-autoupdate --edge-ip-version auto --protocol http2 --url http://127.0.0.1:${ws_b}
 Restart=always
 RestartSec=3
 StandardOutput=append:/var/log/cloudflared-argo-warp.log
