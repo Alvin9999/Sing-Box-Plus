@@ -739,25 +739,44 @@ is_warp_ready() {
 
 
 update_argo_host_and_links() {
-  local tag="$1" log="$2" host=
-  for i in $(seq 1 20); do
-    host="$(grep -Eo 'https://[^ ]+trycloudflare\.com' "$log" 2>/dev/null | sed 's#https://##' | tail -n1)"
-    [ -n "$host" ] && break
-    sleep 1
-  done
-  if [ -z "$host" ]; then
-    # Fallback: journald
-    local unit="cloudflared-argo"; [ "$tag" = "B" ] && unit="cloudflared-argo-warp"
-    host="$(journalctl -u "$unit" -n 200 --no-pager 2>/dev/null | grep -Eo 'https://[^ ]+trycloudflare\.com' | sed 's#https://##' | tail -n1)"
+  # tag: A=直连，B=WARP
+  # log: 对应 cloudflared 的日志文件路径
+  local tag="$1" log="$2" host=""
+
+  # 1) 先从日志文件抓（最多等 30 秒，常见场景 cloudflared 启动后会稍等才打印域名）
+  if [ -n "$log" ]; then
+    for _ in $(seq 1 30); do
+      if [ -s "$log" ]; then
+        host="$(sed -n 's#.*https://\([^/ ]*trycloudflare\.com\).*#\1#p' "$log" | tail -1)"
+        [ -n "$host" ] && break
+      fi
+      sleep 1
+    done
   fi
-[ -n "$host" ] || { echo "[WARN] 未获取到 ARGO(${tag}) 域名"; return 0; }
-mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
-if [ "$tag" = "A" ]; then
-  echo "$host" > "$SBP_ARGO_HOST_FILE"
-else
-  echo "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
-fi
-rebuild_argo_links
+
+  # 2) 兜底：从 journald 抓（某些环境没有把输出重定向到文件）
+  if [ -z "$host" ]; then
+    local unit="cloudflared-argo"; [ "$tag" = "B" ] && unit="cloudflared-argo-warp"
+    host="$(journalctl -u "$unit" -n 400 --no-pager 2>/dev/null \
+            | sed -n 's#.*https://\([^/ ]*trycloudflare\.com\).*#\1#p' | tail -1)"
+  fi
+
+  # 3) 没抓到就提示，避免中断主流程
+  if [ -z "$host" ]; then
+    echo "[WARN] 未获取到 ARGO(${tag}) 域名；稍后可重试或重启 cloudflared-argo${tag=B?'-warp':''}。"
+    return 0
+  fi
+
+  # 4) 写入 host 文件并重建链接
+  mkdir -p "$(dirname "$SBP_ARGO_HOST_FILE")"
+  if [ "$tag" = "A" ]; then
+    printf '%s\n' "$host" > "$SBP_ARGO_HOST_FILE"
+  else
+    printf '%s\n' "$host" > "${SBP_ARGO_HOST_FILE%.txt}-warp.txt"
+  fi
+  echo "[OK] 捕获 ARGO(${tag}) 域名：$host"
+
+  rebuild_argo_links
 }
 
 rebuild_argo_links() {
