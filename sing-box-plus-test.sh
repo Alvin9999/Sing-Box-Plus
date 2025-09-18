@@ -813,6 +813,7 @@ rebuild_argo_links() {
 start_cloudflared_argo() {
   [ "${SBP_ARGO}" = "1" ] || return 0
   install_cloudflared || return 0
+  SBP_ARGO_BIN_DIR="${SBP_ARGO_BIN_DIR:-/usr/local/bin}"   # ← 兜底
   mkdir -p /opt/sing-box
 
   # 选一个未被占用的随机端口（28000-40000）
@@ -837,6 +838,11 @@ ARGO_WS_PATH=$path_a
 ARGO_WS_PORT_WARP=$ws_b
 ARGO_WS_PATH_WARP=$path_b
 EOF
+
+  # 先把 ARGO 入站写进配置并让 sing-box 监听起来（关键增强点）
+  augment_config_with_argo
+  systemctl restart sing-box 2>/dev/null || true
+  sleep 1
 
   # systemd A（直连）
   cat >/etc/systemd/system/cloudflared-argo.service <<EOF
@@ -880,38 +886,10 @@ EOF
     systemctl enable --now cloudflared-argo-warp >/dev/null 2>&1 || true
   fi
 
-  # 抓取域名并重建分享链接
+  # 抓取域名并重建分享链接（配合你刚换的新 update_argo_host_and_links）
   update_argo_host_and_links "A" "/var/log/cloudflared-argo.log"
   if systemctl is-enabled cloudflared-argo-warp >/dev/null 2>&1; then
     update_argo_host_and_links "B" "/var/log/cloudflared-argo-warp.log"
-  fi
-}
-
-augment_config_with_argo() {
-  [ -f /opt/sing-box/argo.env ] || return 0
-  . /opt/sing-box/argo.env
-  [ -n "$ARGO_WS_PORT" ] && [ -n "$ARGO_WS_PATH" ] || return 0
-
-  local has_warp=0
-  if jq -e '.outbounds[]? | select(.tag=="warp")' "${CONF_JSON}" >/dev/null 2>&1; then
-    has_warp=1
-  fi
-
-  tmpcfg="$(mktemp)"
-  jq --arg UID "$UUID"      --argjson PA "${ARGO_WS_PORT}"      --arg APath "${ARGO_WS_PATH}"      --argjson PB "${ARGO_WS_PORT_WARP:-0}"      --arg BPath "${ARGO_WS_PATH_WARP:-}"      ' .inbounds += [
-         {type:"vless", tag:"vless-ws-argo", listen:"127.0.0.1", listen_port:$PA,
-          users:[{uuid:$UID}], transport:{type:"ws", path:$APath}, tls:{enabled:false}}
-       ] +
-       ( if $PB>0 and ($BPath|length)>0 then
-         [ {type:"vless", tag:"vless-ws-argo-warp", listen:"127.0.0.1", listen_port:$PB,
-             users:[{uuid:$UID}], transport:{type:"ws", path:$BPath}, tls:{enabled:false}} ]
-         else [] end )' "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
-
-  if [ "$has_warp" = "1" ]; then
-    tmpcfg="$(mktemp)"
-    jq ' .route = (.route // {}) |
-        .route.rules = (.route.rules // []) |
-        .route.rules += [ { inbound: ["vless-ws-argo-warp"], outbound:"warp" } ] '         "${CONF_JSON}" > "$tmpcfg" && mv -f "$tmpcfg" "${CONF_JSON}"
   fi
 }
 
