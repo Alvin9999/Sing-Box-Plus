@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v2.5.0
+#  Version: v2.5.1
 #  author：Alvin9999
 #  Repo: https://github.com/Alvin9999/Sing-Box-Plus
 # ============================================================
 
 set -Eeuo pipefail
 
-SBP_VERSION="2.5.0"
+SBP_VERSION="2.5.1"
 
 # =========================
-# 基础路径（与旧版保持一致）
+# 基础路径 / 变量
 # =========================
 SB_DIR=${SB_DIR:-/opt/sing-box}
 CONF_JSON=${CONF_JSON:-$SB_DIR/config.json}
 CERT_DIR=${CERT_DIR:-$SB_DIR/cert}
-CF_BIN=${CF_BIN:-/usr/local/bin/cloudflared}
 SBP_ROOT=${SBP_ROOT:-/var/lib/sing-box-plus}
 SBP_BIN_DIR=${SBP_BIN_DIR:-$SBP_ROOT/bin}
 SB_BIN=${SB_BIN:-$SBP_BIN_DIR/sing-box}
+CF_BIN=${CF_BIN:-/usr/local/bin/cloudflared}
+WGCF_BIN=${WGCF_BIN:-$SBP_BIN_DIR/wgcf}
 SYSTEMD_SERVICE=${SYSTEMD_SERVICE:-sing-box.service}
 
 mkdir -p "$SB_DIR" "$CERT_DIR" "$SBP_BIN_DIR"
@@ -30,16 +31,30 @@ C_BLUE="$(printf '\033[34m')" ; C_CYAN="$(printf '\033[36m')"
 C_DIM="$(printf '\033[2m')"   ; C_RED="$(printf '\033[31m')"
 hr(){ printf '%s\n' "------------------------------------------------------------"; }
 
-# ============ 工具 ============
+# ============ 工具函数 ============
 safe_source(){ local f="$1"; [[ -s "$f" ]] || return 1; set +u; # shellcheck disable=SC1090
 source "$f"; set -u; }
-urlenc(){ python3 - <<'PY' "$1" 2>/dev/null || true
+
+detect_goarch(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; armv7l|armv7) echo armv7;; i386|i686) echo 386;; *) echo amd64;; esac; }
+dl(){ local url="$1" out="$2"; if command -v curl >/dev/null; then curl -fsSL --retry 2 --connect-timeout 8 -o "$out" "$url"; else wget -qO "$out" "$url"; fi; }
+
+b64enc(){ if base64 --help 2>&1 | grep -q -- " -w "; then base64 -w 0; else base64 | tr -d '\n'; fi; }
+pad_b64(){ local s="${1:-}"; s="$(printf '%s' "$s" | tr -d '\r\n\" ')"; s="${s%%=*}"; local r=$(( ${#s} % 4 )); ((r==2))&&s="${s}=="; ((r==3))&&s="${s}="; printf '%s' "$s"; }
+
+# URL 编码：优先 python3，否则用 jq，最后简单兜底
+urlenc(){
+  local s="${1:-}"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<PY "$s"
 import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))
 PY
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s' "$s" | jq -sRr @uri
+  else
+    # 仅替换空格 -> %20 的简陋兜底
+    printf '%s' "$s" | sed 's/ /%20/g'
+  fi
 }
-b64enc(){ if base64 --help 2>&1 | grep -q -- " -w "; then base64 -w 0; else base64 | tr -d '\n'; fi; }
-detect_goarch(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; armv7l|armv7) echo armv7;; i386|i686) echo 386;; *) echo amd64;; esac; }
-dl(){ local url="$1" out="$2"; if command -v curl >/dev/null; then curl -fsSL --retry 2 --connect-timeout 6 -o "$out" "$url"; else wget -qO "$out" "$url"; fi; }
 
 get_ip(){
   local ip=""
@@ -49,16 +64,24 @@ get_ip(){
   echo "${ip:-127.0.0.1}"
 }
 
-# ============ 配置读写 ============
-ENV_FILE="$SB_DIR/env.conf" ; CREDS_FILE="$SB_DIR/creds.env" ; PORTS_FILE="$SB_DIR/ports.env" ; WARP_FILE="$SB_DIR/warp.env"
+pause(){ echo; read -rp "按回车返回主菜单..." _; }
+sudo_exec(){ if [[ $EUID -ne 0 ]]; then sudo "$0" "$@"; else "$0" "$@"; fi; }
+
+# ============ 文件路径 ============
+ENV_FILE="$SB_DIR/env.conf"
+CREDS_FILE="$SB_DIR/creds.env"
+PORTS_FILE="$SB_DIR/ports.env"
+WARP_FILE="$SB_DIR/warp.env"
 ARGO_FILE="$SB_DIR/argo.env"
 
+# ============ 环境 / 凭据 / 端口 ============
 load_env(){ safe_source "$ENV_FILE" || true; : "${ENABLE_WARP:=true}" "${VMESS_WS_PATH:=/vm}" "${GRPC_SERVICE:=grpc}" ; }
-save_env(){ {
-  echo "ENABLE_WARP=${ENABLE_WARP}"
-  echo "VMESS_WS_PATH=${VMESS_WS_PATH}"
-  echo "GRPC_SERVICE=${GRPC_SERVICE}"
-} >"$ENV_FILE"; }
+save_env(){ cat >"$ENV_FILE"<<EOF
+ENABLE_WARP=${ENABLE_WARP}
+VMESS_WS_PATH=${VMESS_WS_PATH}
+GRPC_SERVICE=${GRPC_SERVICE}
+EOF
+}
 
 load_creds(){ safe_source "$CREDS_FILE" || true; }
 save_creds(){ cat >"$CREDS_FILE"<<EOF
@@ -101,15 +124,48 @@ PORT_TUIC_W=${PORT_TUIC_W}
 EOF
 }
 
-# ============ 引导与依赖（包管理器优先，失败回退） ============
-ensure_jq(){ command -v jq >/dev/null 2>&1 && return 0;
-  local arch url out="$SBP_BIN_DIR/jq"; arch="$(detect_goarch)"
-  url="https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}"
-  dl "$url" "$out" || { [[ "$arch" = amd64 ]] && dl "https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64" "$out" || true; }
-  chmod +x "$out" 2>/dev/null || true; command -v jq >/dev/null 2>&1; }
+rand_hex(){ openssl rand -hex 12; }
+
+ensure_creds(){
+  load_creds
+  : "${UUID:=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)}"
+  : "${HY2_PWD:=$(rand_hex)}" ; : "${HY2_PWD2:=$(rand_hex)}" ; : "${HY2_OBFS_PWD:=$(rand_hex)}"
+  : "${SS2022_KEY:=$(openssl rand -base64 32)}" ; : "${SS_PWD:=$(rand_hex)}"
+  : "${TUIC_UUID:=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)}" ; : "${TUIC_PWD:=$(rand_hex)}"
+  : "${REALITY_SERVER:=www.cloudflare.com}" ; : "${REALITY_SERVER_PORT:=443}"
+  if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" ]]; then
+    local j; j="$("$SB_BIN" generate reality-keypair | jq -c '.' 2>/dev/null || true)"
+    if [[ -n "$j" ]]; then REALITY_PRIV="$(jq -r '.PrivateKey'<<<"$j")"; REALITY_PUB="$(jq -r '.PublicKey'<<<"$j")"; fi
+  fi
+  : "${REALITY_SID:=$(echo $(rand_hex) | cut -c1-8)}"
+  save_creds
+}
+
+ensure_ports(){
+  load_ports
+  # 直连 9
+  : "${PORT_VLESSR:=30001}" ; : "${PORT_VLESS_GRPCR:=30002}" ; : "${PORT_TROJANR:=30003}"
+  : "${PORT_HY2:=30004}"     ; : "${PORT_VMESS_WS:=30005}"   ; : "${PORT_HY2_OBFS:=30006}"
+  : "${PORT_SS2022:=30007}"  ; : "${PORT_SS:=30008}"         ; : "${PORT_TUIC:=30009}"
+  # WARP 9
+  : "${PORT_VLESSR_W:=31001}" ; : "${PORT_VLESS_GRPCR_W:=31002}" ; : "${PORT_TROJANR_W:=31003}"
+  : "${PORT_HY2_W:=31004}"     ; : "${PORT_VMESS_WS_W:=31005}"   ; : "${PORT_HY2_OBFS_W:=31006}"
+  : "${PORT_SS2022_W:=31007}"  ; : "${PORT_SS_W:=31008}"         ; : "${PORT_TUIC_W:=31009}"
+  save_ports
+}
+
+# ============ 启动引导（安装依赖 / sing-box / 自签证书） ============
+ensure_jq(){
+  command -v jq >/dev/null 2>&1 && return 0
+  local arch out="$SBP_BIN_DIR/jq"; arch="$(detect_goarch)"
+  dl "https://github.com/jqlang/jq/releases/latest/download/jq-linux-${arch}" "$out" \
+    || { [[ "$arch" = amd64 ]] && dl "https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64" "$out" || true; }
+  chmod +x "$out" 2>/dev/null || true
+  command -v jq >/dev/null 2>&1
+}
 
 sbp_bootstrap(){
-  [[ $EUID -eq 0 ]] || { echo "[ERR] 请使用 root 运行或前置 sudo"; exit 1; }
+  [[ $EUID -eq 0 ]] || { echo "[ERR] 请使用 root 运行或加 sudo"; exit 1; }
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y >/dev/null 2>&1 || true
     apt-get install -y curl openssl tar unzip ca-certificates uuid-runtime iproute2 >/dev/null 2>&1 || true
@@ -122,7 +178,7 @@ sbp_bootstrap(){
   fi
   ensure_jq || { echo "[ERR] 无法获得 jq"; exit 1; }
 
-  # 安装 sing-box 二进制（便于生成 Reality 密钥）
+  # 安装 sing-box 二进制（生成 Reality 密钥 & 运行）
   if [[ ! -x "$SB_BIN" ]]; then
     local a tmp json url pkg ; a="$(detect_goarch)"; tmp="$(mktemp -d)"
     json="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest)"
@@ -138,52 +194,19 @@ sbp_bootstrap(){
     install -m 0755 "$bin" "$SB_BIN"; rm -rf "$tmp"
   fi
 
-  # 兜底证书（hy2/tuic/ss2022 用）
+  # 自签证书（hy2/tuic/ss2022 用）
   if [[ ! -f "$CERT_DIR/private.key" || ! -f "$CERT_DIR/cert.pem" ]]; then
     openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/private.key" >/dev/null 2>&1
     openssl req -new -x509 -days 36500 -key "$CERT_DIR/private.key" -out "$CERT_DIR/cert.pem" -subj "/CN=www.microsoft.com" >/dev/null 2>&1
   fi
 }
 
-# ============ 凭据/端口/证书 ============
-rand_hex(){ openssl rand -hex 12; }
-ensure_creds(){
-  load_creds
-  : "${UUID:=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)}"
-  : "${HY2_PWD:=$(rand_hex)}" ; : "${HY2_PWD2:=$(rand_hex)}" ; : "${HY2_OBFS_PWD:=$(rand_hex)}"
-  : "${SS2022_KEY:=$(openssl rand -base64 32)}" ; : "${SS_PWD:=$(rand_hex)}"
-  : "${TUIC_UUID:=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)}" ; : "${TUIC_PWD:=$(rand_hex)}"
-  : "${REALITY_SERVER:=www.cloudflare.com}" ; : "${REALITY_SERVER_PORT:=443}"
-  if [[ -z "${REALITY_PRIV:-}" || -z "${REALITY_PUB:-}" ]]; then
-    local j; j="$("$SB_BIN" generate reality-keypair | jq -c '.' 2>/dev/null || true)"
-    if [[ -n "$j" ]]; then REALITY_PRIV="$(jq -r '.PrivateKey'<<<"$j")"; REALITY_PUB="$(jq -r '.PublicKey'<<<"$j")"; fi
-  fi
-  : "${REALITY_SID:=$(echo $(rand_hex) | cut -c1-8)}"
-  save_creds
-}
-ensure_ports(){
-  load_ports
-  # 直连
-  : "${PORT_VLESSR:=30001}" ; : "${PORT_VLESS_GRPCR:=30002}" ; : "${PORT_TROJANR:=30003}"
-  : "${PORT_HY2:=30004}"     ; : "${PORT_VMESS_WS:=30005}"   ; : "${PORT_HY2_OBFS:=30006}"
-  : "${PORT_SS2022:=30007}"  ; : "${PORT_SS:=30008}"         ; : "${PORT_TUIC:=30009}"
-  # WARP
-  : "${PORT_VLESSR_W:=31001}" ; : "${PORT_VLESS_GRPCR_W:=31002}" ; : "${PORT_TROJANR_W:=31003}"
-  : "${PORT_HY2_W:=31004}"     ; : "${PORT_VMESS_WS_W:=31005}"   ; : "${PORT_HY2_OBFS_W:=31006}"
-  : "${PORT_SS2022_W:=31007}"  ; : "${PORT_SS_W:=31008}"         ; : "${PORT_TUIC_W:=31009}"
-  save_ports
-}
-mk_cert(){ :; }  # 自签证书已在 bootstrap 阶段处理
-
 # ============ WARP (wgcf) ============
-WGCF_BIN=${WGCF_BIN:-$SBP_BIN_DIR/wgcf}
-pad_b64(){ local s="${1:-}"; s="$(printf '%s' "$s" | tr -d '\r\n\" ')"; s="${s%%=*}"; local r=$(( ${#s} % 4 )); ((r==2))&&s="${s}=="; ((r==3))&&s="${s}="; printf '%s' "$s"; }
-
 install_wgcf(){
   [[ -x "$WGCF_BIN" ]] && return 0
-  local a url tmp ; a="$(detect_goarch)" ; tmp="$(mktemp -d)"
-  url="https://github.com/ViRb3/wgcf/releases/latest/download/wgcf-linux-${a}"
-  dl "$url" "$tmp/wgcf" && install -m 0755 "$tmp/wgcf" "$WGCF_BIN" || { echo "[WARN] 获取 wgcf 失败"; return 1; }
+  local a tmp; a="$(detect_goarch)"; tmp="$(mktemp -d)"
+  dl "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf-linux-${a}" "$tmp/wgcf" \
+    && install -m 0755 "$tmp/wgcf" "$WGCF_BIN" || { echo "[WARN] 获取 wgcf 失败"; return 1; }
   rm -rf "$tmp"
 }
 
@@ -205,7 +228,6 @@ ensure_warp_profile(){
   load_env
   [[ "${ENABLE_WARP}" == "true" ]] || return 0
   load_warp
-  # 已完整则返回
   if [[ -n "${WARP_PRIVATE_KEY:-}" && -n "${WARP_PEER_PUBLIC_KEY:-}" && -n "${WARP_ENDPOINT_HOST:-}" && -n "${WARP_ENDPOINT_PORT:-}" ]]; then
     WARP_PRIVATE_KEY="$(pad_b64 "$WARP_PRIVATE_KEY")"
     WARP_PEER_PUBLIC_KEY="$(pad_b64 "$WARP_PEER_PUBLIC_KEY")"
@@ -426,11 +448,11 @@ EOF
 
 install_cloudflared(){
   [[ -x "$CF_BIN" ]] && return 0
-  local a url tmp ; a="$(detect_goarch)" ; tmp="$(mktemp -d)"
+  local a url tmp ; a="$(detect_goarch)"; tmp="$(mktemp -d)"
   url="$(curl -fsSL https://api.github.com/repos/cloudflare/cloudflared/releases/latest \
         | jq -r --arg a "$a" '.assets[] | select(.name|test("^cloudflared-linux-" + $a + "$")) | .browser_download_url' | head -n1)"
   [[ -n "$url" ]] || { echo "[ERR] 未找到 cloudflared 发行包"; exit 1; }
-  dl "$url" "$tmp/cloudflared" ; install -m 0755 "$tmp/cloudflared" "$CF_BIN" ; rm -rf "$tmp"
+  dl "$url" "$tmp/cloudflared"; install -m 0755 "$tmp/cloudflared" "$CF_BIN"; rm -rf "$tmp"
 }
 
 start_argo(){
@@ -442,7 +464,7 @@ start_argo(){
 }
 
 wait_argo_hosts(){
-  local deadline=$((SECONDS+30))
+  local deadline=$((SECONDS+35))
   while (( SECONDS < deadline )); do
     safe_source "$ARGO_FILE" || true
     [[ -n "${ARGO_HOST_DIRECT:-}" && -n "${ARGO_HOST_WARP:-}" ]] && return 0
@@ -509,7 +531,7 @@ print_links(){
   hr
 }
 
-# ============ 主流程 ============
+# ============ 子命令 ============
 cmd_install(){
   sbp_bootstrap
   ensure_creds
@@ -556,9 +578,13 @@ cmd_uninstall(){
   systemctl daemon-reload
 
   rm -f "$SB_DIR/sbp-argo-run.sh" "$ARGO_FILE" "$SB_DIR/argo.env.lock" "$SB_DIR/argo-direct.log" "$SB_DIR/argo-warp.log"
-  echo "[OK] 已卸载 systemd 配置（保留 $SB_DIR 下的 *.env 与 config.json）"
+  echo "[OK] 已卸载 systemd 配置（保留 $SB_DIR 下的 *.env 与 $CONF_JSON）"
 }
 
+cmd_argo_install(){
+  start_argo
+  if wait_argo_hosts; then print_links; else echo "[WARN] 暂未捕获到域名，可稍后运行：$0 links"; fi
+}
 cmd_argo_restart(){
   systemctl restart cloudflared-sbp@direct.service || true
   systemctl restart cloudflared-sbp@warp.service || true
@@ -572,19 +598,15 @@ cmd_argo_status(){
   echo
   [[ -s "$ARGO_FILE" ]] && cat "$ARGO_FILE" || echo "(no argo.env)"
 }
-cmd_argo_install(){
-  start_argo
-  if wait_argo_hosts; then print_links; else echo "[WARN] 暂未捕获到域名，可稍后运行：$0 links"; fi
-}
 
 usage(){
 cat <<USAGE
 sing-box-plus v${SBP_VERSION}
 
 用法:
-  sudo $0 install         # 一键安装/生成配置/启动服务 + 启动 Argo 两实例
+  sudo $0 install         # 一键安装/更新（依赖/证书/配置/服务）+ 启动 Argo 两实例
   sudo $0 restart         # 重启 sing-box
-  $0   status             # 查看状态 & 当前 env/ports/argo
+  $0   status             # 查看状态 & 当前 env/creds/ports/argo
   $0   links              # 打印 18 + 2 Argo 分享链接
   sudo $0 uninstall       # 卸载 systemd（保留配置文件）
 
@@ -593,18 +615,45 @@ Argo 管理:
   sudo $0 argo-restart    # 重启 Argo 两实例，刷新 trycloudflare 域名
   $0   argo-status        # 查看 Argo 状态与当前域名
 
-说明:
-- 配置与数据位于 ${SB_DIR}
-  - ${ENV_FILE} / ${CREDS_FILE} / ${PORTS_FILE} / ${ARGO_FILE}
-- 18 节点：直连 9 + WARP 9；Argo 额外提供 2 条 vmess-ws（443 TLS）：
-  - Argo 直连   -> 暴露本地 ${PORT_VMESS_WS:-30005}
-  - Argo + WARP -> 暴露本地 ${PORT_VMESS_WS_W:-31005}
-- 重启后临时域名会变，脚本会自动写入 argo.env；“查看分享链接”即时读取。
+也可直接运行不带参数进入交互式主菜单：  $0 menu
 USAGE
 }
 
+# ============ 主菜单 ============
+menu(){
+  while true; do
+    clear
+    echo -e "${C_BOLD}sing-box-plus v${SBP_VERSION}${C_RESET}"
+    hr
+    echo "1) 一键安装/更新（依赖/证书/配置/服务 + Argo）"
+    echo "2) 查看分享链接（18 + 2 Argo）"
+    echo "3) 查看运行状态（sing-box/env/ports/argo）"
+    echo "4) 重启 sing-box"
+    echo "5) 安装/启动 Argo（cloudflared 两实例）"
+    echo "6) 重启 Argo（刷新临时域名）"
+    echo "7) 查看 Argo 状态"
+    echo "8) 卸载（移除 systemd，保留配置文件）"
+    echo "9) 退出"
+    hr
+    read -rp "请选择 [1-9]: " ans
+    case "$ans" in
+      1) sudo_exec install; pause ;;
+      2) "$0" links; pause ;;
+      3) "$0" status; pause ;;
+      4) sudo_exec restart; pause ;;
+      5) sudo_exec argo-install; pause ;;
+      6) sudo_exec argo-restart; pause ;;
+      7) "$0" argo-status; pause ;;
+      8) sudo_exec uninstall; pause ;;
+      9) clear; exit 0 ;;
+      *) echo "无效选择"; sleep 1 ;;
+    esac
+  done
+}
+
 # ============ 入口 ============
-case "${1:-}" in
+case "${1:-menu}" in
+  menu)           menu ;;
   install)        cmd_install ;;
   restart)        cmd_restart ;;
   status)         cmd_status ;;
@@ -613,5 +662,5 @@ case "${1:-}" in
   argo-install)   cmd_argo_install ;;
   argo-restart)   cmd_argo_restart ;;
   argo-status)    cmd_argo_status ;;
-  *)              usage ;;
+  *)              menu ;;
 esac
