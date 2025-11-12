@@ -29,7 +29,7 @@
 
 > WARP 出站更利于流媒体解锁与回程质量。
 
-​**注意： Shadowsocks 2022和Shadowsocks协议可能容易被封，不推荐使用。**
+​**注意： Shadowsocks 2022 和 Shadowsocks 协议可能容易被封，不推荐使用。**
 
 ---
 
